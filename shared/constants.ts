@@ -15,10 +15,7 @@ export const HIT_RADIUS = PLAYER_RADIUS + BEAM_HALF_WIDTH;
  */
 export const MOVE_SPEED = 440;
 
-/**
- * The lights return at a random point inside this window. Clients are never
- * told which â€” they only get the fixed flicker cue, then the snap arrives.
- */
+/** Each blackout lasts a random length inside this window, announced as it starts. */
 export const BLACKOUT_MIN_MS = 2400;
 export const BLACKOUT_MAX_MS = 3000;
 
