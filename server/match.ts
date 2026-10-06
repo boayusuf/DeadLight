@@ -174,6 +174,9 @@ export class Match {
 
     const survivors = this.players.filter((p) => p.alive);
     const previousSize = this.size;
+    // Taken before any shrink moves people, so everyone sees the positions the
+    // shots were actually fired from; the client animates the push inward.
+    const players = this.snapshot(contenders);
     let shrank = false;
 
     if (survivors.length > 1) {
@@ -199,7 +202,7 @@ export class Match {
       stage: this.stage,
       size: this.size,
       previousSize,
-      players: this.snapshot(contenders),
+      players,
       resolution,
       remaining: survivors.length,
       holdMs,

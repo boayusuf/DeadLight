@@ -2,15 +2,17 @@ import './style.css';
 import {
   ARENA_BASE_SIZE,
   MAX_PLAYERS,
+  PLAYER_RADIUS,
   PLAYER_COLORS,
   RESOLVE_DELAY_MS,
   SHRINK_WARN_MS,
   TICK_MS,
 } from '../shared/constants.js';
+import { clampToArena } from '../shared/arena.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { ServerMessage } from '../shared/protocol.js';
 import { Sfx } from './audio.js';
-import { Input } from './input.js';
+import { Input, touchDevice } from './input.js';
 import { Net } from './net.js';
 import { Prediction } from './prediction.js';
 import { Renderer, type Scene } from './render.js';
@@ -51,8 +53,9 @@ const dom = {
   btnAgain: el<HTMLButtonElement>('btn-again'),
 };
 
-const renderer = new Renderer(el<HTMLCanvasElement>('stage'));
-const input = new Input(document.body);
+const stage = el<HTMLCanvasElement>('stage');
+const renderer = new Renderer(stage);
+const input = new Input(stage);
 const sfx = new Sfx();
 const prediction = new Prediction();
 
@@ -252,6 +255,13 @@ function handle(msg: ServerMessage): void {
       scene.darkAt = performance.now();
       scene.darkEndsAt = scene.darkAt + msg.durationMs;
       prediction.reset();
+      // The snapshot showed where you fired from; start moving from where the
+      // shrunken wall actually left you.
+      if (scene.self && scene.lights) {
+        const inside = clampToArena(scene.self, scene.lights.size, PLAYER_RADIUS);
+        scene.self.x = inside.x;
+        scene.self.y = inside.y;
+      }
       nextTickAt = 0;
       sfx.startHum();
       return;
@@ -410,6 +420,7 @@ async function join(mode: 'public' | 'create' | 'code'): Promise<void> {
 }
 
 dom.name.value = localStorage.getItem('deadlight.name') ?? '';
+el('touch-hint').hidden = !touchDevice;
 dom.btnPublic.addEventListener('click', () => void join('public'));
 dom.btnCreate.addEventListener('click', () => void join('create'));
 dom.codeForm.addEventListener('submit', (e) => {

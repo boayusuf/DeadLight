@@ -13,7 +13,11 @@ export class Net {
   constructor(
     private readonly onMessage: (msg: ServerMessage) => void,
     private readonly onDrop: () => void,
-  ) {}
+  ) {
+    // Leave the room straight away when the tab closes, instead of waiting
+    // for the server's heartbeat to notice.
+    addEventListener('pagehide', () => this.socket?.close());
+  }
 
   async connect(): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) return;

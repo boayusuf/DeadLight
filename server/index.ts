@@ -41,6 +41,23 @@ const lobby = new Lobby();
 
 let nextId = 1;
 
+/**
+ * A phone that closes a tab or loses signal often never says goodbye, so the
+ * socket just goes quiet. Anyone who misses a ping is dropped.
+ */
+const HEARTBEAT_MS = 10_000;
+const answered = new WeakMap<WebSocket, boolean>();
+setInterval(() => {
+  for (const socket of wss.clients) {
+    if (!answered.get(socket)) {
+      socket.terminate();
+      continue;
+    }
+    answered.set(socket, false);
+    socket.ping();
+  }
+}, HEARTBEAT_MS);
+
 function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 12) : '';
   return name || `Player ${nextId}`;
@@ -48,6 +65,8 @@ function cleanName(raw: unknown): string {
 
 wss.on('connection', (socket: WebSocket) => {
   const id = `p${nextId++}`;
+  answered.set(socket, true);
+  socket.on('pong', () => answered.set(socket, true));
   const conn = {
     send: (payload: string) => {
       if (socket.readyState === socket.OPEN) socket.send(payload);

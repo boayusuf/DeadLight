@@ -4,8 +4,12 @@ export const BROADCAST_HZ = 20;
 
 export const PLAYER_RADIUS = 28;
 export const BARREL_LENGTH = 34;
-export const BEAM_HALF_WIDTH = 2;
-export const HIT_RADIUS = PLAYER_RADIUS + BEAM_HALF_WIDTH;
+/**
+ * How close a beam has to pass to count. Wider than the collision radius on
+ * purpose: it covers the whole drawn fighter, so a beam that visibly crosses a
+ * shoulder or a leg is a hit.
+ */
+export const HIT_RADIUS = 38;
 
 /**
  * Units per second, set so one blackout covers the full width of a stage-one

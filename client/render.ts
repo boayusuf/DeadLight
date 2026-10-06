@@ -1,6 +1,7 @@
-import { arenaVertices, rayToWall } from '../shared/arena.js';
+import { arenaVertices, clampToArena, rayToWall } from '../shared/arena.js';
 import {
   BARREL_LENGTH,
+  PLAYER_RADIUS,
   RESOLVE_DELAY_MS,
   SHRINK_ANIM_MS,
   SHRINK_WARN_MS,
@@ -169,9 +170,11 @@ export class Renderer {
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const deviceW = Math.round(innerWidth * dpr);
     const deviceH = Math.round(innerHeight * dpr);
-    const needed = (this.baseSize * 1.3) / UNITS_PER_PX;
-
-    this.scale = Math.max(1, Math.floor(Math.min(deviceW, deviceH) / needed));
+    // The HUD sits above and below the arena, so only the height needs room for
+    // it. Fitting the two separately lets a portrait phone use its full width.
+    const arenaPx = this.baseSize / UNITS_PER_PX;
+    const fit = Math.min(deviceW / (arenaPx * 1.06), deviceH / (arenaPx * 1.3));
+    this.scale = Math.max(1, Math.floor(fit));
     const width = Math.ceil(deviceW / this.scale);
     const height = Math.ceil(deviceH / this.scale);
     this.buffer.resize(width, height);
@@ -332,7 +335,7 @@ export class Renderer {
     }
 
     buffer.present(this.ctx, this.scale);
-    if (scene.inMatch && lit) this.drawNameplates(scene);
+    if (scene.inMatch && lit) this.drawNameplates(scene, size);
   }
 
   private currentSize(scene: Scene, now: number): number {
@@ -624,9 +627,12 @@ export class Renderer {
       }
     }
 
-    for (const player of lights.players) {
-      const fighter = scene.roster.get(player.id);
+    for (const shown of lights.players) {
+      const fighter = scene.roster.get(shown.id);
       if (!fighter) continue;
+      // Snapshots hold where each shot was fired from; the shrinking wall then
+      // visibly pushes anyone caught outside it.
+      const player = { ...shown, ...clampToArena(shown, size, PLAYER_RADIUS) };
 
       if (player.alive) {
         this.drawFighter(player, fighter, now, { walking: false });
@@ -958,7 +964,7 @@ export class Renderer {
   }
 
   /** Names are interface, not world art, so they stay crisp at a fixed size. */
-  private drawNameplates(scene: Scene): void {
+  private drawNameplates(scene: Scene, size: number): void {
     const lights = scene.lights;
     if (!lights) return;
 
@@ -968,11 +974,12 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.letterSpacing = `${Math.round(2 * dpr)}px`;
 
-    for (const player of lights.players) {
-      if (!player.alive) continue;
-      const fighter = scene.roster.get(player.id);
+    for (const shown of lights.players) {
+      if (!shown.alive) continue;
+      const fighter = scene.roster.get(shown.id);
       if (!fighter) continue;
-      ctx.fillStyle = player.id === scene.selfId ? '#ccd6e2' : 'rgba(121,132,154,0.75)';
+      const player = clampToArena(shown, size, PLAYER_RADIUS);
+      ctx.fillStyle = shown.id === scene.selfId ? '#ccd6e2' : 'rgba(121,132,154,0.75)';
       ctx.fillText(
         fighter.name.slice(0, 10).toUpperCase(),
         this.px(player.x) * this.scale,

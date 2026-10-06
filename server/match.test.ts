@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { TICK_MS } from '../shared/constants.js';
+import { inradius } from '../shared/arena.js';
+import { BARREL_LENGTH, PLAYER_RADIUS, TICK_MS } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { Match } from './match.js';
 
@@ -126,6 +127,34 @@ describe('Match', () => {
     expect(lights.previousSize).toBe(720);
     expect(lights.size).toBeCloseTo(576, 6);
     expect(lights.stage).toBe(1);
+  });
+
+  it('shows players where they fired from, and only then pushes them inside the new wall', () => {
+    for (let round = 1; round <= 2; round++) {
+      runUntil('dark');
+      runUntil('lights');
+    }
+
+    // Run into the wall on the round that shrinks the arena.
+    const a = find('a');
+    const out = Math.hypot(a.x, a.y);
+    runUntil('dark');
+    match.input('a', 1, a.x / out, a.y / out, a.aim);
+    const lights = runUntil('lights');
+    expect(lights.size).toBeLessThan(lights.previousSize);
+
+    // Distance in the octagon's own measure: flat sides, not a circle.
+    const reach = (p: { x: number; y: number }) =>
+      Math.max(Math.abs(p.x), Math.abs(p.y), (Math.abs(p.x) + Math.abs(p.y)) * Math.SQRT1_2);
+    const fired = find('a');
+    const beam = lights.resolution!.beams.find((b) => b.id === 'a')!;
+    const muzzle = Math.hypot(beam.ox - fired.x, beam.oy - fired.y);
+    expect(muzzle).toBeCloseTo(BARREL_LENGTH, 6);
+    expect(reach(fired)).toBeGreaterThan(inradius(lights.size) - PLAYER_RADIUS);
+
+    runUntil('dark');
+    runUntil('lights');
+    expect(reach(find('a'))).toBeLessThanOrEqual(inradius(lights.size) - PLAYER_RADIUS + 1e-6);
   });
 
   it('keeps a dropped player on the field as a frozen target', () => {
