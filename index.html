@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeadLight</title>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="flash" aria-hidden="true"></div>
+
+    <div id="overlay">
+      <section class="screen" id="panel-menu">
+        <header class="title">
+          <h1>DEADLIGHT</h1>
+        </header>
+
+        <label class="field">
+          <span>Player name</span>
+          <input id="name" maxlength="12" autocomplete="off" spellcheck="false" />
+        </label>
+
+        <div class="actions">
+          <button id="btn-public" class="key">Find match</button>
+          <button id="btn-create" class="key">Create party</button>
+        </div>
+
+        <form class="field inline" id="form-code">
+          <span>Party code</span>
+          <input id="code" maxlength="4" placeholder="----" autocomplete="off" spellcheck="false" />
+          <button type="submit" class="key">Join</button>
+        </form>
+
+        <p class="error" id="menu-error"></p>
+      </section>
+
+      <section class="screen" id="panel-lobby" hidden>
+        <header class="title">
+          <h2 id="lobby-title">Party</h2>
+          <p class="sub" id="lobby-sub">Waiting for fighters</p>
+        </header>
+
+        <div class="readout" id="lobby-code-row" hidden>
+          <span>Party code</span>
+          <button class="code" id="lobby-code"></button>
+        </div>
+
+        <div class="readout">
+          <span>Fighters</span>
+          <b id="lobby-count">0/6</b>
+        </div>
+        <ul id="lobby-players"></ul>
+
+        <div class="actions">
+          <button id="btn-ready" class="key">Ready</button>
+          <button id="btn-start" class="key" hidden>Start match</button>
+          <button id="btn-leave" class="key quiet">Leave</button>
+        </div>
+      </section>
+
+      <section class="screen" id="panel-result" hidden>
+        <h2 id="result-title">Eliminated</h2>
+        <canvas id="result-sprite" width="56" height="80"></canvas>
+        <p class="sub" id="result-detail"></p>
+        <ol id="result-standings"></ol>
+        <div class="actions">
+          <button id="btn-again" class="key">Rematch</button>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/client/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+# One web service serves both the client and the WebSocket server.
+services:
+  - type: web
+    name: deadlight
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /
