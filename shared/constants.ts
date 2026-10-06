@@ -23,6 +23,13 @@ export const MOVE_SPEED = 440;
 export const BLACKOUT_MIN_MS = 2400;
 export const BLACKOUT_MAX_MS = 3000;
 
+/**
+ * Clients stop moving at the announced end of a blackout, but their last
+ * input is still in flight. The server waits this long before resolving, so
+ * the shot that fires is the one the player actually saw.
+ */
+export const SNAP_GRACE_MS = 250;
+
 /** Warning flicker: two environment-only pulses, always ahead of the snap. */
 export const FLICKER_PULSES: readonly [number, number][] = [
   [1900, 1970],

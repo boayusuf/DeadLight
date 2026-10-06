@@ -90,8 +90,15 @@ export class Room {
     this.sendLobby();
   }
 
-  input(id: string, seq: number, mx: number, my: number, aim: number): void {
-    this.match?.input(id, seq, mx, my, aim);
+  input(
+    id: string,
+    seq: number,
+    mx: number,
+    my: number,
+    aim: number,
+    report?: { x: number; y: number },
+  ): void {
+    this.match?.input(id, seq, mx, my, aim, report);
   }
 
   tick(now: number, dt: number): void {

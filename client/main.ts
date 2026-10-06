@@ -87,6 +87,8 @@ let ready = false;
 let resultTimer = 0;
 let leavingResult = false;
 let lastStep = 0;
+/** Set once the final position of a blackout has been sent. */
+let locked = false;
 
 const net = new Net(handle, () => {
   scene.inMatch = false;
@@ -254,6 +256,7 @@ function handle(msg: ServerMessage): void {
       scene.phase = 'dark';
       scene.darkAt = performance.now();
       scene.darkEndsAt = scene.darkAt + msg.durationMs;
+      locked = false;
       prediction.reset();
       // The snapshot showed where you fired from; start moving from where the
       // shrunken wall actually left you.
@@ -355,12 +358,20 @@ function loop(now: number): void {
   const dt = Math.min((now - lastFrame) / 1000, 0.05);
   lastFrame = now;
 
-  const dir = scene.phase === 'dark' ? input.direction() : { x: 0, y: 0 };
+  // At the announced end the fighter freezes and its final position and aim go
+  // out at once, so the shot that fires is exactly the one on screen.
+  const frozen = scene.phase === 'dark' && now >= scene.darkEndsAt;
+  if (frozen && !locked) {
+    locked = true;
+    sendInput();
+  }
+
+  const dir = scene.phase === 'dark' && !frozen ? input.direction() : { x: 0, y: 0 };
   const walking = dir.x !== 0 || dir.y !== 0;
   renderer.setMoving(walking);
 
   if (scene.phase === 'dark' && scene.lights) {
-    if (scene.self) {
+    if (scene.self && !frozen) {
       const moved = stepPlayer(scene.self, dir.x, dir.y, dt, scene.lights.size);
       scene.self.x = moved.x;
       scene.self.y = moved.y;
@@ -395,12 +406,15 @@ function loop(now: number): void {
   requestAnimationFrame(loop);
 }
 
-setInterval(() => {
+function sendInput(): void {
   if (scene.phase !== 'dark' || !scene.self) return;
-  const dir = input.direction();
-  const seq = prediction.record(scene.self.x, scene.self.y);
-  net.send({ t: 'input', seq, mx: dir.x, my: dir.y, aim: scene.self.aim });
-}, TICK_MS);
+  const dir = locked ? { x: 0, y: 0 } : input.direction();
+  const { x, y, aim } = scene.self;
+  const seq = prediction.record(x, y);
+  net.send({ t: 'input', seq, mx: dir.x, my: dir.y, aim, x, y });
+}
+
+setInterval(sendInput, TICK_MS);
 
 async function join(mode: 'public' | 'create' | 'code'): Promise<void> {
   sfx.enable();

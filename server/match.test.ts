@@ -157,6 +157,39 @@ describe('Match', () => {
     expect(reach(find('a'))).toBeLessThanOrEqual(inradius(lights.size) - PLAYER_RADIUS + 1e-6);
   });
 
+  it('takes the position a client reports when it could really have got there', () => {
+    const a = find('a');
+    runUntil('dark');
+    advance(500);
+    match.input('a', 1, 0, 0, a.aim, { x: a.x + 100, y: a.y }, clock);
+    runUntil('lights');
+    expect(find('a').x).toBeCloseTo(a.x + 100, 6);
+  });
+
+  it('refuses a report that would mean moving faster than anyone can', () => {
+    const a = find('a');
+    runUntil('dark');
+    advance(100);
+    match.input('a', 1, 0, 0, a.aim, { x: a.x + 300, y: a.y }, clock);
+    runUntil('lights');
+    expect(find('a').x).toBeCloseTo(a.x, 6);
+  });
+
+  it('still counts the last aim sent just after the announced end of the blackout', () => {
+    runUntil('dark');
+    runUntil('lights');
+    const a = find('a');
+    const b = find('b');
+
+    const dark = runUntil('dark');
+    match.input('b', 1, 0, 0, aimAt(b, a) + Math.PI / 2);
+    advance(dark.durationMs + 120);
+    expect(match.phase).toBe('dark');
+    match.input('a', 1, 0, 0, aimAt(a, b));
+
+    expect(runUntil('lights').resolution!.eliminated).toEqual(['b']);
+  });
+
   it('keeps a dropped player on the field as a frozen target', () => {
     runUntil('dark');
     runUntil('lights');

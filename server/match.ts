@@ -5,7 +5,9 @@ import {
   BLACKOUT_MIN_MS,
   LIGHTS_ON_MS,
   LIGHTS_ON_SHRINK_MS,
+  MOVE_SPEED,
   PLAYER_RADIUS,
+  SNAP_GRACE_MS,
 } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage, SnapshotPlayer, Standing } from '../shared/protocol.js';
 import { resolveRound } from '../shared/resolve.js';
@@ -23,7 +25,13 @@ interface MatchPlayer extends LobbyPlayer {
   out: number | null;
   /** Latest input sequence number received from this player. */
   seq: number;
+  /** Last position the client reported and the server accepted, and when. */
+  anchor: { x: number; y: number; at: number };
 }
+
+/** Headroom for network jitter when checking how far a report has moved. */
+const REPORT_TOLERANCE = 1.3;
+const REPORT_SLACK = 24;
 
 type Phase = 'lights' | 'dark' | 'over';
 
@@ -67,6 +75,7 @@ export class Match {
       my: 0,
       out: null,
       seq: 0,
+      anchor: { x: spawns[i]!.x, y: spawns[i]!.y, at: now },
     }));
 
     this.phaseEndsAt = now + LIGHTS_ON_MS;
@@ -84,7 +93,20 @@ export class Match {
     });
   }
 
-  input(id: string, seq: number, mx: number, my: number, aim: number): void {
+  /**
+   * `report` is where the client says it is. It is accepted only if that spot
+   * was reachable at full speed since the last accepted report, so the server
+   * still decides who can be where — it just stops lagging behind the player.
+   */
+  input(
+    id: string,
+    seq: number,
+    mx: number,
+    my: number,
+    aim: number,
+    report?: { x: number; y: number },
+    now = Date.now(),
+  ): void {
     if (this.phase !== 'dark') return;
     const p = this.players.find((x) => x.id === id);
     if (!p?.alive || !p.connected) return;
@@ -93,6 +115,16 @@ export class Match {
     p.my = my;
     p.seq = Math.max(p.seq, seq);
     if (Number.isFinite(aim)) p.aim = aim;
+
+    if (!report || !Number.isFinite(report.x) || !Number.isFinite(report.y)) return;
+    const inside = clampToArena(report, this.size, PLAYER_RADIUS);
+    const reach =
+      ((MOVE_SPEED * Math.max(0, now - p.anchor.at)) / 1000) * REPORT_TOLERANCE + REPORT_SLACK;
+    if (Math.hypot(inside.x - p.anchor.x, inside.y - p.anchor.y) > reach) return;
+
+    p.x = inside.x;
+    p.y = inside.y;
+    p.anchor = { x: inside.x, y: inside.y, at: now };
   }
 
   /** A dropped player leaves a frozen body that can still be hit. */
@@ -154,9 +186,10 @@ export class Match {
     for (const p of this.players) {
       p.mx = 0;
       p.my = 0;
+      p.anchor = { x: p.x, y: p.y, at: now };
     }
     const duration = Math.round(BLACKOUT_MIN_MS + Math.random() * (BLACKOUT_MAX_MS - BLACKOUT_MIN_MS));
-    this.phaseEndsAt = now + duration;
+    this.phaseEndsAt = now + duration + SNAP_GRACE_MS;
     this.send({ t: 'dark', round: this.round, durationMs: duration });
   }
 
