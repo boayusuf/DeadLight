@@ -27,7 +27,8 @@ export type ClientMessage =
   | { t: 'join'; name: string; mode: 'code'; code: string }
   | { t: 'start' }
   | { t: 'ready'; value: boolean }
-  | { t: 'input'; mx: number; my: number; aim: number }
+  /** `seq` numbers each input so the server can say which ones it has applied. */
+  | { t: 'input'; seq: number; mx: number; my: number; aim: number }
   | { t: 'again' };
 
 export type ServerMessage
@@ -49,10 +50,10 @@ export type ServerMessage
       remaining: number;
       holdMs: number;
     }
-  /** Blackout begins. Deliberately carries no duration. */
-  | { t: 'dark'; round: number }
-  /** Your own corrected position during blackout. */
-  | { t: 'self'; x: number; y: number }
+  /** Blackout begins, and how long it will last. */
+  | { t: 'dark'; round: number; durationMs: number }
+  /** Your own position during blackout, as of input `seq`. */
+  | { t: 'self'; x: number; y: number; seq: number }
   /** Eliminated players and late joiners watch the blackout in full light. */
   | { t: 'watch'; players: SnapshotPlayer[] }
   | { t: 'over'; winner: string | null; rounds: number; standings: Standing[] }

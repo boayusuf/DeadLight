@@ -87,7 +87,7 @@ wss.on('connection', (socket: WebSocket) => {
         room?.setReady(id, Boolean(msg.value));
         return;
       case 'input':
-        room?.input(id, Number(msg.mx) || 0, Number(msg.my) || 0, Number(msg.aim));
+        room?.input(id, Number(msg.seq) || 0, Number(msg.mx) || 0, Number(msg.my) || 0, Number(msg.aim));
         return;
     }
   });

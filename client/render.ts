@@ -6,6 +6,7 @@ import {
   SHRINK_WARN_MS,
   SIGHT_RADIUS,
   STAGE_COUNT,
+  STAGE_SCALE,
 } from '../shared/constants.js';
 import type { ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { ambientAt } from './lighting.js';
@@ -35,6 +36,7 @@ export interface Scene {
   lights: Lights | null;
   lightsAt: number;
   darkAt: number;
+  darkEndsAt: number;
   /** Null while spectating: a living client only ever knows where it is itself. */
   self: { x: number; y: number; aim: number } | null;
   watch: SnapshotPlayer[];
@@ -66,6 +68,15 @@ const AMBER_DIM = 0x7a5320;
 const EMITTER = 0x7fc9b0;
 const PALE = 0xccd6e2;
 const INK = 0x79849a;
+
+/**
+ * One muted tint per stage band, outermost first. Each shrink
+ * switches the outer colour off, so the floor itself shows how far the match
+ * has gone and where it will close next. Kept low in saturation so the
+ * fighters stay the brightest thing in the room.
+ */
+const RING_TINTS = [0x2c6e6a, 0x7a3a2c, 0x5f6a2c, 0x3b4a7e, 0x6e5a3a] as const;
+const RING_MIX = 0.3;
 
 const PANEL = 14;
 const DEATH_FADE_MS = 460;
@@ -121,6 +132,12 @@ export class Renderer {
   private readonly ctx: CanvasRenderingContext2D;
   private scale = 1;
   private baseSize = 900;
+
+  /** Floor colours per band, as [even, odd] panels, mixed once up front. */
+  private readonly ringFloor = RING_TINTS.map((tint) => [
+    mix(FLOOR_B, tint, RING_MIX),
+    mix(FLOOR_A, tint, RING_MIX),
+  ]);
 
   private particles: Particle[] = [];
   private markers: Marker[] = [];
@@ -345,20 +362,37 @@ export class Renderer {
   private drawFacility(scene: Scene, size: number, now: number): void {
     const buffer = this.buffer;
 
-    // Plated floor: alternating panels with recessed seams and a lit lip.
+    // Plated floor: alternating panels with recessed seams, tinted by stage band.
+    const half = this.baseSize / 2;
+    const ox = buffer.width / 2;
+    const oy = buffer.height / 2;
     this.eachRow(size, (y, x0, x1) => {
       const row = Math.floor(y / PANEL);
       const onRow = y % PANEL === 0;
       const lip = y % PANEL === 1;
+      const wy = Math.abs((y - oy) * UNITS_PER_PX);
       for (let x = x0; x <= x1; x++) {
         if (onRow || x % PANEL === 0) {
           buffer.blend(x, y, SEAM, 1);
           continue;
         }
-        buffer.blend(x, y, (Math.floor(x / PANEL) + row) & 1 ? FLOOR_A : FLOOR_B, 1);
+        const wx = Math.abs((x - ox) * UNITS_PER_PX);
+        // Distance in the octagon's own measure, so bands follow its walls.
+        const reach = Math.max(wx, wy, (wx + wy) * Math.SQRT1_2) / half;
+        let band = 0;
+        while (band < STAGE_COUNT - 1 && reach <= STAGE_SCALE[band + 1]!) band++;
+        const checker = (Math.floor(x / PANEL) + row) & 1;
+        buffer.blend(x, y, this.ringFloor[band]![checker]!, 1);
         if (lip) buffer.blend(x, y, PANEL_LIP, 0.3);
       }
     });
+
+    // Where the wall will stop next, scored into the floor.
+    for (let stage = 1; stage < STAGE_COUNT; stage++) {
+      const line = this.baseSize * STAGE_SCALE[stage]!;
+      if (line >= size - 1) continue;
+      buffer.polyline(this.octagon(line), METAL_DARK, 0.7);
+    }
 
     this.drawHazardBands(scene, size, now);
     this.drawCables(size);
@@ -622,7 +656,6 @@ export class Renderer {
       this.drawBeam(this.traceFrom(scene.self, size), fighter.color, 0.95, now, 1, false);
       this.drawFighter({ ...scene.self, id: scene.selfId, alive: true }, fighter, now, {
         walking: this.moving,
-        rim: 0.5,
       });
       return;
     }
@@ -893,14 +926,15 @@ export class Renderer {
       buffer.rect(pipsX + i * pipW, pad + 13, pipW - 3, 2, on ? AMBER : METAL, (on ? 0.95 : 0.4) * dim);
     }
 
-    // One timer, one meaning: how long until the lights go out. Nothing is shown
-    // in the dark, because when they come back is the one thing nobody may know.
-    const elapsed = now - scene.lightsAt;
-    if (scene.phase === 'lights' && lights.remaining > 1) {
-      const left = Math.max(0, lights.holdMs - elapsed) / 1000;
-      const timer = `LIGHTS OUT ${left.toFixed(2)}`;
-      buffer.text(timer, cx - Math.round(buffer.textWidth(timer) / 2), pad + 18, INK, 0.75);
+    // The one timer that matters: how much relocation time is left.
+    if (scene.phase === 'dark') {
+      const left = Math.max(0, scene.darkEndsAt - now) / 1000;
+      const timer = `LIGHTS ON ${left.toFixed(2)}`;
+      const urgent = left < 0.6;
+      buffer.text(timer, cx - Math.round(buffer.textWidth(timer) / 2), pad + 18, urgent ? AMBER : PALE, 0.9);
     }
+
+    const elapsed = now - scene.lightsAt;
 
     // Announced only while it is actually happening.
     const shrinking =

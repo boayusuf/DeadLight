@@ -12,6 +12,7 @@ import type { ServerMessage } from '../shared/protocol.js';
 import { Sfx } from './audio.js';
 import { Input } from './input.js';
 import { Net } from './net.js';
+import { Prediction } from './prediction.js';
 import { Renderer, type Scene } from './render.js';
 import { SPRITE_H, SPRITE_W, sprite } from './sprites.js';
 
@@ -52,6 +53,7 @@ const dom = {
 const renderer = new Renderer(el<HTMLCanvasElement>('stage'));
 const input = new Input(document.body);
 const sfx = new Sfx();
+const prediction = new Prediction();
 
 const rgb = (hex: string) => parseInt(hex.slice(1), 16);
 /** Each colour slot owns a fighter design, so a colour always reads as a face. */
@@ -65,6 +67,7 @@ const scene: Scene = {
   lights: null,
   lightsAt: 0,
   darkAt: 0,
+  darkEndsAt: 0,
   self: null,
   watch: [],
   scorches: [],
@@ -184,6 +187,7 @@ function handle(msg: ServerMessage): void {
       scene.lights = msg;
       scene.lightsAt = now;
       scene.phase = 'lights';
+      prediction.reset();
       sfx.stopHum();
 
       const me = msg.players.find((p) => p.id === scene.selfId);
@@ -224,6 +228,8 @@ function handle(msg: ServerMessage): void {
     case 'dark': {
       scene.phase = 'dark';
       scene.darkAt = performance.now();
+      scene.darkEndsAt = scene.darkAt + msg.durationMs;
+      prediction.reset();
       nextTickAt = 0;
       sfx.startHum();
       return;
@@ -231,11 +237,9 @@ function handle(msg: ServerMessage): void {
 
     case 'self': {
       if (!scene.self) return;
-      const drift = Math.hypot(msg.x - scene.self.x, msg.y - scene.self.y);
-      // Trust local input unless it has genuinely diverged, so keys feel direct.
-      const weight = drift > 60 ? 1 : 0.12;
-      scene.self.x += (msg.x - scene.self.x) * weight;
-      scene.self.y += (msg.y - scene.self.y) * weight;
+      const corrected = prediction.reconcile(msg, scene.self);
+      scene.self.x = corrected.x;
+      scene.self.y = corrected.y;
       return;
     }
 
@@ -362,7 +366,8 @@ function loop(now: number): void {
 setInterval(() => {
   if (scene.phase !== 'dark' || !scene.self) return;
   const dir = input.direction();
-  net.send({ t: 'input', mx: dir.x, my: dir.y, aim: scene.self.aim });
+  const seq = prediction.record(scene.self.x, scene.self.y);
+  net.send({ t: 'input', seq, mx: dir.x, my: dir.y, aim: scene.self.aim });
 }, TICK_MS);
 
 async function join(mode: 'public' | 'create' | 'code'): Promise<void> {

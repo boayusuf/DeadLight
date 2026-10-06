@@ -21,6 +21,8 @@ interface MatchPlayer extends LobbyPlayer {
   my: number;
   /** Round this player went out on, or null while still standing. */
   out: number | null;
+  /** Latest input sequence number received from this player. */
+  seq: number;
 }
 
 type Phase = 'lights' | 'dark' | 'over';
@@ -64,6 +66,7 @@ export class Match {
       mx: 0,
       my: 0,
       out: null,
+      seq: 0,
     }));
 
     this.phaseEndsAt = now + LIGHTS_ON_MS;
@@ -81,13 +84,14 @@ export class Match {
     });
   }
 
-  input(id: string, mx: number, my: number, aim: number): void {
+  input(id: string, seq: number, mx: number, my: number, aim: number): void {
     if (this.phase !== 'dark') return;
     const p = this.players.find((x) => x.id === id);
     if (!p?.alive || !p.connected) return;
 
     p.mx = mx;
     p.my = my;
+    p.seq = Math.max(p.seq, seq);
     if (Number.isFinite(aim)) p.aim = aim;
   }
 
@@ -116,7 +120,7 @@ export class Match {
     if (this.phase !== 'dark') return;
 
     for (const p of this.players) {
-      if (p.alive && p.connected) this.send({ t: 'self', x: p.x, y: p.y }, p.id);
+      if (p.alive && p.connected) this.send({ t: 'self', x: p.x, y: p.y, seq: p.seq }, p.id);
     }
 
     if (spectators.length === 0) return;
@@ -151,8 +155,9 @@ export class Match {
       p.mx = 0;
       p.my = 0;
     }
-    this.phaseEndsAt = now + BLACKOUT_MIN_MS + Math.random() * (BLACKOUT_MAX_MS - BLACKOUT_MIN_MS);
-    this.send({ t: 'dark', round: this.round });
+    const duration = Math.round(BLACKOUT_MIN_MS + Math.random() * (BLACKOUT_MAX_MS - BLACKOUT_MIN_MS));
+    this.phaseEndsAt = now + duration;
+    this.send({ t: 'dark', round: this.round, durationMs: duration });
   }
 
   private endBlackout(now: number): void {

@@ -86,12 +86,12 @@ describe('Match', () => {
   it('only moves players while the lights are out', () => {
     const start = find('a');
 
-    match.input('a', 1, 0, 0);
+    match.input('a', 0, 1, 0, 0);
     advance(TICK_MS * 10);
     expect(find('a').x).toBeCloseTo(start.x, 6);
 
     runUntil('dark');
-    match.input('a', 1, 0, 0);
+    match.input('a', 0, 1, 0, 0);
     runUntil('lights');
     expect(find('a').x).toBeGreaterThan(start.x + 100);
   });
@@ -103,8 +103,8 @@ describe('Match', () => {
     const b = find('b');
 
     runUntil('dark');
-    match.input('a', 0, 0, aimAt(a, b));
-    match.input('b', 0, 0, aimAt(b, a) + Math.PI / 2);
+    match.input('a', 0, 0, 0, aimAt(a, b));
+    match.input('b', 0, 0, 0, aimAt(b, a) + Math.PI / 2);
     const lights = runUntil('lights');
 
     expect(lights.resolution!.eliminated).toEqual(['b']);
@@ -136,9 +136,9 @@ describe('Match', () => {
 
     runUntil('dark');
     // Look away first, so the frozen aim cannot cancel the incoming shot.
-    match.input('b', 1, 1, aimAt(b, a) + Math.PI / 2);
+    match.input('b', 0, 1, 1, aimAt(b, a) + Math.PI / 2);
     match.disconnect('b');
-    match.input('a', 0, 0, aimAt(a, b));
+    match.input('a', 0, 0, 0, aimAt(a, b));
     const lights = runUntil('lights');
 
     expect(find('b').x).toBeCloseTo(b.x, 6);
