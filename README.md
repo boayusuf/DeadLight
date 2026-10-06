@@ -14,6 +14,7 @@ party, send the four-letter code to your friends, ready up.
 
 ## How to play
 
+- Pick one of six fighters in the lobby. Each colour can only be taken by one player.
 - **WASD** to move, **mouse** to aim. You can only move while the lights are off.
 - A laser hits **every** player it crosses.
 - If two players hit each other, both shots cancel and both survive.

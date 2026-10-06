@@ -73,6 +73,16 @@ export class Room {
     return this.hostId !== null;
   }
 
+  /** One colour per fighter; a taken colour is simply ignored. */
+  setColor(id: string, color: string): void {
+    const member = this.members.find((m) => m.id === id);
+    if (!member || this.match) return;
+    if (!(PLAYER_COLORS as readonly string[]).includes(color)) return;
+    if (this.members.some((m) => m.id !== id && m.color === color)) return;
+    member.color = color;
+    this.sendLobby();
+  }
+
   setReady(id: string, value: boolean): void {
     const member = this.members.find((m) => m.id === id);
     if (!member || this.match) return;

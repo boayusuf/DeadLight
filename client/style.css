@@ -319,6 +319,45 @@ li.winner .tag {
   color: var(--amber);
 }
 
+/* --- Fighter picker ------------------------------------------------- */
+
+.roster {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.pick {
+  display: grid;
+  place-items: center;
+  padding: 6px 0 4px;
+  background: var(--void);
+  border: 1px solid var(--metal);
+  border-bottom-width: 3px;
+  cursor: pointer;
+}
+
+.pick canvas {
+  width: 21px;
+  height: 30px;
+  image-rendering: pixelated;
+}
+
+.pick:hover:not(:disabled) {
+  border-color: var(--pale);
+}
+
+.pick.mine {
+  border-color: var(--amber);
+  background: #1c2129;
+}
+
+/* Someone else is wearing it. */
+.pick:disabled {
+  opacity: 0.22;
+  cursor: default;
+}
+
 /* --- Result ---------------------------------------------------------- */
 
 #panel-result {

@@ -27,6 +27,8 @@ export type ClientMessage =
   | { t: 'join'; name: string; mode: 'code'; code: string }
   | { t: 'start' }
   | { t: 'ready'; value: boolean }
+  /** Pick a colour, and with it a fighter. Refused if someone else has it. */
+  | { t: 'color'; color: string }
   /** `seq` numbers each input so the server can say which ones it has applied. */
   | { t: 'input'; seq: number; mx: number; my: number; aim: number }
   | { t: 'again' };

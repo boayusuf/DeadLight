@@ -38,6 +38,7 @@ const dom = {
   lobbyCode: el('lobby-code'),
   lobbyCount: el('lobby-count'),
   lobbyPlayers: el('lobby-players'),
+  lobbyColors: el('lobby-colors'),
   resultTitle: el('result-title'),
   resultDetail: el('result-detail'),
   resultStandings: el('result-standings'),
@@ -124,6 +125,20 @@ function paintSprite(canvas: HTMLCanvasElement, archetype: number, color: number
   ctx.putImageData(image, 0, 0);
 }
 
+/** One button per colour, each showing the fighter that colour belongs to. */
+const picks = PLAYER_COLORS.map((color) => {
+  const button = document.createElement('button');
+  button.className = 'pick';
+  button.title = color;
+  button.style.borderBottomColor = color;
+  const canvas = document.createElement('canvas');
+  paintSprite(canvas, archetypeOf(color), rgb(color));
+  button.append(canvas);
+  button.addEventListener('click', () => net.send({ t: 'color', color }));
+  dom.lobbyColors.append(button);
+  return { color, button };
+});
+
 function handle(msg: ServerMessage): void {
   switch (msg.t) {
     case 'lobby': {
@@ -139,6 +154,13 @@ function handle(msg: ServerMessage): void {
       dom.btnStart.disabled = msg.players.length < 2;
       dom.btnReady.classList.toggle('on', ready);
       dom.btnReady.textContent = ready ? 'Ready ×' : 'Ready';
+
+      const mine = msg.players.find((p) => p.id === msg.selfId)?.color;
+      const taken = new Set(msg.players.map((p) => p.color));
+      for (const { color, button } of picks) {
+        button.classList.toggle('mine', color === mine);
+        button.disabled = color !== mine && taken.has(color);
+      }
 
       dom.lobbyPlayers.replaceChildren(
         ...msg.players.map((p) => {

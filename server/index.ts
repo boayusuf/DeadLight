@@ -86,6 +86,9 @@ wss.on('connection', (socket: WebSocket) => {
       case 'ready':
         room?.setReady(id, Boolean(msg.value));
         return;
+      case 'color':
+        room?.setColor(id, String(msg.color));
+        return;
       case 'input':
         room?.input(id, Number(msg.seq) || 0, Number(msg.mx) || 0, Number(msg.my) || 0, Number(msg.aim));
         return;
