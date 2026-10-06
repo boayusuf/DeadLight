@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { arenaSize, clampToArena, inradius, rayToWall, spawnPoints } from './arena.js';
-import { PLAYER_RADIUS } from './constants.js';
+import { MAX_PLAYERS, PLAYER_RADIUS, STANDARD_ARENA } from './constants.js';
 
 const SIZE = 1200;
 
@@ -38,6 +38,15 @@ describe('arena', () => {
     expect(arenaSize(6, 0)).toBe(1040);
     expect(arenaSize(6, 3)).toBeCloseTo(468, 6);
     expect(arenaSize(2, 0)).toBe(720);
+    expect(arenaSize(10, 0)).toBe(1280);
+    expect(arenaSize(10, 0)).toBeGreaterThan(arenaSize(6, 0));
+  });
+
+  it('grows for big lobbies and never drops below the standard arena', () => {
+    expect(arenaSize(6, 0)).toBe(STANDARD_ARENA);
+    for (let players = 7; players <= MAX_PLAYERS; players++) {
+      expect(arenaSize(players, 0)).toBeGreaterThan(arenaSize(players - 1, 0));
+    }
   });
 
   it('spawns everyone inside the arena, facing the centre', () => {

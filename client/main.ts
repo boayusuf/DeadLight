@@ -6,6 +6,7 @@ import {
   PLAYER_COLORS,
   RESOLVE_DELAY_MS,
   SHRINK_WARN_MS,
+  STANDARD_ARENA,
   TICK_MS,
 } from '../shared/constants.js';
 import { clampToArena } from '../shared/arena.js';
@@ -66,7 +67,7 @@ const archetypeOf = (hex: string) => Math.max(0, PLAYER_COLORS.indexOf(hex as ne
 const scene: Scene = {
   selfId: '',
   roster: new Map(),
-  baseSize: ARENA_BASE_SIZE[6]!,
+  baseSize: STANDARD_ARENA,
   phase: 'lights',
   lights: null,
   lightsAt: 0,
@@ -195,7 +196,7 @@ function handle(msg: ServerMessage): void {
           { name: p.name, color: rgb(p.color), archetype: archetypeOf(p.color) },
         ]),
       );
-      scene.baseSize = ARENA_BASE_SIZE[msg.startCount] ?? ARENA_BASE_SIZE[6]!;
+      scene.baseSize = ARENA_BASE_SIZE[msg.startCount] ?? STANDARD_ARENA;
       scene.scorches = [];
       scene.watch = [];
       scene.spectating = false;

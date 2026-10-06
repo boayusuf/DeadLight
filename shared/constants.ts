@@ -45,7 +45,7 @@ export const SHRINK_ANIM_MS = 800;
 export const SHRINK_WARN_MS = 420;
 
 export const MIN_PLAYERS = 2;
-export const MAX_PLAYERS = 6;
+export const MAX_PLAYERS = 10;
 
 /** Short, and only once everyone has said they are ready. */
 export const LOBBY_COUNTDOWN_MS = 5_000;
@@ -61,7 +61,16 @@ export const ARENA_BASE_SIZE: Record<number, number> = {
   4: 880,
   5: 960,
   6: 1040,
+  // Bigger lobbies get a bigger room, never a smaller one, growing more gently
+  // than the small sizes so a blackout still covers most of the floor.
+  7: 1100,
+  8: 1160,
+  9: 1220,
+  10: 1280,
 };
+
+/** The arena size every match up to six players is built around. */
+export const STANDARD_ARENA = 1040;
 
 export const STAGE_SCALE = [1.0, 0.8, 0.62, 0.45, 0.32] as const;
 export const STAGE_COUNT = STAGE_SCALE.length;
@@ -71,7 +80,7 @@ export const STAGE_THRESHOLDS = [0.8, 0.6, 0.4, 0.25] as const;
 export const STALL_ROUNDS = 3;
 
 /**
- * Six suits that stay apart on a cold grey floor without turning the screen
+ * Ten suits that stay apart on a cold grey floor without turning the screen
  * into a neon sign: each one is a muted body colour with a brighter trim.
  */
 export const PLAYER_COLORS = [
@@ -81,6 +90,10 @@ export const PLAYER_COLORS = [
   '#56a86b',
   '#b4588e',
   '#c96a33',
+  '#3aa9b3',
+  '#7d62c9',
+  '#b9c0cc',
+  '#9cba3a',
 ] as const;
 
 export const SIGHT_RADIUS = 115;

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { inradius } from './arena.js';
 import {
-  ARENA_BASE_SIZE,
   BLACKOUT_MIN_MS,
   MOVE_SPEED,
   PLAYER_RADIUS,
+  STANDARD_ARENA,
   TICK_MS,
 } from './constants.js';
 import { stepPlayer } from './movement.js';
@@ -57,11 +57,10 @@ describe('stepPlayer', () => {
     }
   });
 
-  it('covers the widest arena within the shortest blackout', () => {
-    // Relocation is meant to be unrestricted: wherever you were seen, you can
-    // reach anywhere else before the lights come back.
+  it('crosses the standard arena within the shortest blackout', () => {
+    // In a match of up to six, wherever you were seen you can reach the far
+    // wall before the lights come back. Bigger lobbies get a bigger room.
     const reach = MOVE_SPEED * (BLACKOUT_MIN_MS / 1000);
-    const widest = Math.max(...Object.values(ARENA_BASE_SIZE));
-    expect(reach).toBeGreaterThanOrEqual(widest);
+    expect(reach).toBeGreaterThanOrEqual(STANDARD_ARENA);
   });
 });

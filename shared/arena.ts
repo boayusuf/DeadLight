@@ -16,7 +16,7 @@ export function inradius(size: number): number {
 }
 
 export function arenaSize(playerCount: number, stage: number): number {
-  const base = ARENA_BASE_SIZE[Math.min(Math.max(playerCount, 2), MAX_PLAYERS)] ?? ARENA_BASE_SIZE[6]!;
+  const base = ARENA_BASE_SIZE[Math.min(Math.max(playerCount, 2), MAX_PLAYERS)] ?? ARENA_BASE_SIZE[MAX_PLAYERS]!;
   return base * (STAGE_SCALE[stage] ?? STAGE_SCALE[STAGE_SCALE.length - 1]!);
 }
 

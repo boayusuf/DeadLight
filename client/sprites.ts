@@ -271,6 +271,11 @@ export const ARCHETYPES: readonly Archetype[] = [
   { hair: 0x2e2b3d, hairLight: 0x5e5878 },
   { hair: 0x5f8f5a, hairLight: 0x9fd49a },
   { hair: 0xc2a45e, hairLight: 0xf0d9a0 },
+  // Four more fighters reuse the hairstyles above with their own colouring.
+  { hair: 0x1f1f2a, hairLight: 0x4b4b60 },
+  { hair: 0xd27a9c, hairLight: 0xf4b9cf },
+  { hair: 0xb2622c, hairLight: 0xe39a63 },
+  { hair: 0x9b8fd1, hairLight: 0xd3cbf5 },
 ];
 
 const OUTLINE = 0x12141c;

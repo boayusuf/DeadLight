@@ -14,7 +14,7 @@ party, send the four-letter code to your friends, ready up.
 
 ## How to play
 
-- Pick one of six fighters in the lobby. Each colour can only be taken by one player.
+- Up to ten players. Pick one of ten fighters in the lobby. Each colour can only be taken by one player.
 - **WASD** to move, **mouse** to aim. On a phone, your left thumb is a joystick
   and touching the right half aims. You can only move while the lights are off.
 - A laser hits **every** player it crosses.
