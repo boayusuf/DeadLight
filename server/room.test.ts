@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
+import { MAX_PLAYERS, PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
 import type { ServerMessage } from '../shared/protocol.js';
-import { Room } from './room.js';
+import { BOT_FILL_AFTER_MS, BOT_FILL_TO, Room } from './room.js';
 
 function colours(room: Room): Record<string, string> {
   return Object.fromEntries(room.members.map((m) => [m.id, m.color]));
@@ -103,5 +103,88 @@ describe('Room wins', () => {
     // The room drops back to its lobby on the same tick the match settles.
     const lobby = seen.slice(seen.indexOf(over)).find((m) => m.t === 'lobby');
     expect(lobby?.t === 'lobby' && lobby.players.map((p) => p.wins)).toEqual([1, 0]);
+  });
+});
+
+describe('Room arenas', () => {
+  const quiet = { send: (_: string) => {} };
+
+  it('lets the host pick a map or random, and nobody else', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.join('b', 'B', quiet);
+    room.setMap('a', 'mirrors');
+    expect(room.map).toBe('mirrors');
+    room.setMap('b', 'factory');
+    room.setMap('a', 'moon');
+    expect(room.map).toBe('mirrors');
+    room.setMap('a', 'random');
+    expect(room.map).toBe('random');
+  });
+
+  it('keeps matchmaking on random', () => {
+    const room = new Room(null);
+    room.join('a', 'A', quiet);
+    room.setMap('a', 'lab');
+    expect(room.map).toBe('random');
+  });
+});
+
+describe('Room bots', () => {
+  const quiet = { send: (_: string) => {} };
+
+  it('seats a ready bot for the host only', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.join('b', 'B', quiet);
+    room.addBot('b', 'normal');
+    room.addBot('a', 'godlike');
+    expect(room.members).toHaveLength(2);
+    room.addBot('a', 'hard');
+    const bot = room.members[2]!;
+    expect(bot).toMatchObject({ bot: true, ready: true });
+    expect(bot.color).not.toBe(room.members[0]!.color);
+  });
+
+  it('removes a bot on the host\'s word, never a person', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.join('b', 'B', quiet);
+    room.addBot('a', 'easy');
+    const botId = room.members[2]!.id;
+    room.removeBot('a', 'b');
+    room.removeBot('a', botId);
+    expect(room.members.map((m) => m.id)).toEqual(['a', 'b']);
+  });
+
+  it('gives up a bot seat when a person joins a full room', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    for (let i = 1; i < MAX_PLAYERS; i++) room.addBot('a', 'normal');
+    expect(room.members).toHaveLength(MAX_PLAYERS);
+    expect(room.open).toBe(true);
+    room.join('z', 'Z', quiet);
+    expect(room.members).toHaveLength(MAX_PLAYERS);
+    expect(room.members.filter((m) => m.bot)).toHaveLength(MAX_PLAYERS - 2);
+  });
+
+  it('empties out when the last person leaves, bots and all', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.addBot('a', 'normal');
+    room.leave('a', 5000);
+    expect(room.members).toHaveLength(0);
+    expect(room.emptySince).toBe(5000);
+  });
+
+  it('fills a lonely matchmaking room with bots after a wait', () => {
+    const room = new Room(null);
+    room.join('a', 'A', quiet);
+    let clock = 1000;
+    for (; clock < 1000 + BOT_FILL_AFTER_MS - 100; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
+    expect(room.members).toHaveLength(1);
+    for (; clock < 1000 + BOT_FILL_AFTER_MS + 10_000; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
+    expect(room.members).toHaveLength(BOT_FILL_TO);
+    expect(room.members.filter((m) => m.bot)).toHaveLength(BOT_FILL_TO - 1);
   });
 });

@@ -1,16 +1,24 @@
-import { KILLCAM_MS } from '../shared/constants.js';
+import { FINISHER_MAX_MS, KILLCAM_MS } from '../shared/constants.js';
 import type { ReplayTrack } from '../shared/protocol.js';
+import { FINALE_MS, KILLSCREEN_MS } from './killscreen.js';
+
+/** The finisher plays at this speed in the killcam, so it gets twice its time. */
+export const KILLCAM_SLOWMO = 0.5;
 
 /**
- * The killcam's beats, in order. They add up to KILLCAM_MS, the time the
- * server holds the final lights before announcing the result.
+ * The killcam's beats, in order: the blackout replayed, the snap in slow
+ * motion, a freeze on the hit, the anime cut-in, the finisher played out in
+ * full, and the winner's card. They add up to KILLCAM_MS, the time the server
+ * holds the final lights before announcing the result.
  */
 export const KILLCAM_BEATS = [
   ['intro', 300],
   ['replay', 1700],
   ['shot', 900],
   ['freeze', 300],
-  ['boom', KILLCAM_MS - 3200],
+  ['cutin', KILLSCREEN_MS],
+  ['boom', FINISHER_MAX_MS / KILLCAM_SLOWMO],
+  ['finale', FINALE_MS],
 ] as const;
 
 export type KillcamBeat = (typeof KILLCAM_BEATS)[number][0];
@@ -35,7 +43,7 @@ export function beatAt(t: number): { beat: KillcamBeat; p: number; start: number
     if (t < start + length) return { beat, p: Math.max(0, (t - start) / length), start };
     start += length;
   }
-  return { beat: 'boom', p: 1, start: start - KILLCAM_BEATS[KILLCAM_BEATS.length - 1]![1] };
+  return { beat: 'finale', p: 1, start: start - KILLCAM_BEATS[KILLCAM_BEATS.length - 1]![1] };
 }
 
 /** Where a fighter was `u` of the way (0..1) through the replayed blackout. */

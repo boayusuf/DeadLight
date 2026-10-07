@@ -1,6 +1,6 @@
 import type { FinisherId } from '../shared/constants.js';
 import { PixelBuffer } from './pixel.js';
-import { SPRITE_W, facingFor, sprite, type Sprite } from './sprites.js';
+import { SPRITE_H, SPRITE_W, facingFor, sprite, type Sprite } from './sprites.js';
 
 export interface FinisherView {
   buffer: PixelBuffer;
@@ -103,6 +103,8 @@ interface Effect {
   victim: Victim;
   killer: number;
   body: Px[];
+  /** The body as a SPRITE_W x SPRITE_H colour grid, -1 where empty, for finishers that rescale it. */
+  grid: Int32Array;
   dirX: number;
   dirY: number;
   hasDir: boolean;
@@ -116,11 +118,11 @@ interface Effect {
 type Range = readonly [number, number];
 
 const rand = (lo: number, hi: number): number => lo + Math.random() * (hi - lo);
-const clamp = (v: number, lo = 0, hi = 1): number => Math.min(hi, Math.max(lo, v));
-const easeOut = (u: number): number => 1 - (1 - u) * (1 - u);
+export const clamp = (v: number, lo = 0, hi = 1): number => Math.min(hi, Math.max(lo, v));
+export const easeOut = (u: number): number => 1 - (1 - u) * (1 - u);
 const pick = <T>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)]!;
 
-function mix(a: number, b: number, t: number): number {
+export function mix(a: number, b: number, t: number): number {
   const k = clamp(t);
   const r = ((a >> 16) & 0xff) + (((b >> 16) & 0xff) - ((a >> 16) & 0xff)) * k;
   const g = ((a >> 8) & 0xff) + (((b >> 8) & 0xff) - ((a >> 8) & 0xff)) * k;
@@ -129,7 +131,7 @@ function mix(a: number, b: number, t: number): number {
 }
 
 /** Cheap integer hash → 0..1, so flicker is stable within a frame. */
-function hash(a: number, b: number): number {
+export function hash(a: number, b: number): number {
   let h = Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263);
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
@@ -572,6 +574,615 @@ function drawStorm(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: numb
   drawBits(buf, fx, ax, ay, t, false);
 }
 
+/* ----------------------------- cartoon helpers ---------------------------- */
+
+const INK = 0x14161c;
+const SUN = 0xffd84a;
+const easeInOut = (u: number): number => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u));
+
+function grey(color: number): number {
+  const l = Math.round(((color >> 16) & 0xff) * 0.3 + ((color >> 8) & 0xff) * 0.59 + (color & 0xff) * 0.11);
+  return (l << 16) | (l << 8) | l;
+}
+
+function bodyGrid(body: readonly Px[]): Int32Array {
+  const grid = new Int32Array(SPRITE_W * SPRITE_H).fill(-1);
+  for (const p of body) grid[(p.y - BODY_TOP) * SPRITE_W + (p.x - BODY_LEFT)] = p.color;
+  return grid;
+}
+
+interface Pose {
+  /** Buffer x of the horizontal centre and y of the feet edge. */
+  cx: number;
+  bottom: number;
+  /** Stretch factors; samples nearest-neighbour so the result stays on the pixel grid. */
+  sx: number;
+  sy: number;
+  alpha?: number;
+  /** u, v run -1..1 across the drawn box. Return false to cut the pixel. */
+  mask?: (u: number, v: number) => boolean;
+  paint?: (color: number, u: number, v: number) => number;
+}
+
+/** The victim's own sprite pixels, squashed, stretched or shrunk. */
+function drawPose(buf: PixelBuffer, fx: Effect, pose: Pose): void {
+  const w = Math.max(1, Math.round(SPRITE_W * pose.sx));
+  const h = Math.max(1, Math.round(SPRITE_H * pose.sy));
+  const x0 = Math.round(pose.cx - w / 2);
+  const y0 = Math.round(pose.bottom - h);
+  const alpha = pose.alpha ?? 1;
+  for (let y = 0; y < h; y++) {
+    // Sampling row centres keeps a pancake from landing on empty headroom rows.
+    const gy = Math.min(SPRITE_H - 1, Math.floor(((y + 0.5) * SPRITE_H) / h));
+    const v = ((y + 0.5) / h) * 2 - 1;
+    for (let x = 0; x < w; x++) {
+      const gx = Math.min(SPRITE_W - 1, Math.floor(((x + 0.5) * SPRITE_W) / w));
+      const color = fx.grid[gy * SPRITE_W + gx]!;
+      if (color < 0) continue;
+      const u = ((x + 0.5) / w) * 2 - 1;
+      if (pose.mask && !pose.mask(u, v)) continue;
+      buf.blend(x0 + x, y0 + y, pose.paint ? pose.paint(color, u, v) : color, alpha);
+    }
+  }
+}
+
+/** Pixel art from rows of palette keys; unknown keys are transparent. */
+function paintRows(
+  buf: PixelBuffer,
+  rows: readonly string[],
+  x: number,
+  y: number,
+  palette: Record<string, number>,
+  alpha = 1,
+): void {
+  for (let ry = 0; ry < rows.length; ry++) {
+    const row = rows[ry]!;
+    for (let rx = 0; rx < row.length; rx++) {
+      const color = palette[row[rx]!];
+      if (color !== undefined) buf.blend(x + rx, y + ry, color, alpha);
+    }
+  }
+}
+
+/** A four-point twinkle; `size` is the arm length. */
+function drawTwinkle(buf: PixelBuffer, x: number, y: number, size: number, alpha: number): void {
+  buf.line(x - size, y, x + size, y, WHITE, alpha, true);
+  buf.line(x, y - size, x, y + size, WHITE, alpha, true);
+  buf.add(x, y, WHITE, alpha);
+}
+
+/** Flat ellipse of shade on the floor under the anchor. */
+function drawFloorShadow(buf: PixelBuffer, ax: number, ay: number, rx: number, alpha: number): void {
+  const ry = Math.max(1, Math.round(rx * 0.28));
+  for (let dx = -rx; dx <= rx; dx++) {
+    const reach = Math.round(Math.sqrt(Math.max(0, 1 - (dx / rx) ** 2)) * ry);
+    for (let dy = -reach; dy <= reach; dy++) buf.blend(ax + dx, ay + FLOOR_Y + dy, BLACK, alpha);
+  }
+}
+
+/* -------------------------------- 7. anvil ------------------------------- */
+
+const ANVIL_FALL_FROM = 150;
+const ANVIL_HIT = 480;
+const ANVIL_LIFT = 680;
+const ANVIL_FADE_FROM = 1050;
+const ANVIL_W = 24;
+const ANVIL_H = 14;
+/** Plate, horn, waist and foot as x, y, w, h. Rects keep the outline cheap and exact. */
+const ANVIL_RECTS: readonly (readonly [number, number, number, number])[] = [
+  [0, 0, 24, 4],
+  [0, 4, 7, 2],
+  [7, 4, 12, 6],
+  [4, 10, 16, 4],
+];
+
+function buildAnvil(fx: Effect): void {
+  for (let i = 0; i < 14; i++) {
+    const dir = i % 2 === 0 ? 1 : -1;
+    fx.bits.push(
+      makeBit({
+        x: dir * rand(2, 9),
+        y: FLOOR_Y - 1,
+        vx: dir * rand(25, 80),
+        vy: -rand(4, 26),
+        born: ANVIL_HIT,
+        life: rand(300, 460),
+        drag: 3,
+        grav: 40,
+        size: 2,
+        c0: 0xd6dae2,
+        c1: 0x5a5f69,
+      }),
+    );
+  }
+}
+
+function drawAnvilShape(buf: PixelBuffer, cx: number, top: number): void {
+  const x = cx - (ANVIL_W >> 1);
+  for (const [rx, ry, rw, rh] of ANVIL_RECTS) buf.rect(x + rx - 1, top + ry - 1, rw + 2, rh + 2, INK);
+  for (const [rx, ry, rw, rh] of ANVIL_RECTS) buf.rect(x + rx, top + ry, rw, rh, 0x5a6270);
+  buf.rect(x, top, ANVIL_W, 1, 0xa3aebe);
+  buf.rect(x + 1, top + 3, ANVIL_W - 2, 1, 0x3a414c);
+  buf.rect(x + 5, top + 12, 14, 1, 0x3a414c);
+  buf.text('16T', x + 8, top + 5, 0xf2f4f8);
+}
+
+function anvilTop(ay: number, t: number): number {
+  const rest = ay + FLOOR_Y - ANVIL_H;
+  const above = -ANVIL_H - 2;
+  if (t < ANVIL_HIT) return Math.round(above + (rest - above) * clamp((t - ANVIL_FALL_FROM) / (ANVIL_HIT - ANVIL_FALL_FROM)) ** 2);
+  if (t < ANVIL_LIFT) return rest - Math.round(Math.sin(clamp((t - ANVIL_HIT) / 90) * Math.PI) * 4);
+  return Math.round(rest - (rest - above + 4) * clamp((t - ANVIL_LIFT) / 260) ** 2);
+}
+
+function drawPancake(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number, alpha: number): void {
+  const since = t - ANVIL_LIFT;
+  const jelly = since > 0 ? Math.sin(since / 45) * Math.exp(-since / 140) * 0.06 : 0;
+  const sy = 0.18 + jelly;
+  drawPose(buf, fx, { cx: ax, bottom: ay + FLOOR_Y, sx: 1.9, sy, alpha });
+  if (since < 40) return;
+  const popped = since - 40;
+  const lift = easeOut(clamp(popped / 110)) * 3 + Math.sin(popped / 60) * 0.8;
+  const eyeY = Math.round(ay + FLOOR_Y - Math.round(SPRITE_H * sy) - 2 - lift);
+  for (const side of [-1, 1]) {
+    const ex = ax + side * 4;
+    buf.disc(ex, eyeY, 3, INK, alpha);
+    buf.disc(ex, eyeY, 2, WHITE, alpha);
+    buf.blend(ex + Math.round(Math.sin(popped / 50 + side)), eyeY, INK, alpha);
+  }
+  const wheel = since + 200;
+  for (let i = 0; i < 3; i++) {
+    const a = wheel / 170 + i * 2.094;
+    const bx = Math.round(ax + Math.cos(a) * 10);
+    const by = Math.round(eyeY - 4 + Math.sin(a) * 3);
+    buf.rect(bx - 1, by, 3, 1, SUN, alpha);
+    buf.rect(bx, by - 1, 1, 3, SUN, alpha);
+    buf.blend(bx, by, WHITE, alpha);
+  }
+}
+
+function drawAnvilImpact(buf: PixelBuffer, ax: number, ay: number, t: number): void {
+  const age = t - ANVIL_HIT;
+  if (age < 0 || age > 140) return;
+  const u = age / 140;
+  const y = ay + FLOOR_Y - 1;
+  for (let i = 0; i < 6; i++) {
+    const dir = i < 3 ? 1 : -1;
+    const reach = (8 + (i % 3) * 5) * easeOut(u);
+    buf.line(ax + dir * 12, y - (i % 3) * 2, ax + dir * (12 + reach), y - (i % 3) * 3 - 2, WHITE, 1 - u, true);
+  }
+}
+
+function drawAnvil(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const alpha = 1 - clamp((t - ANVIL_FADE_FROM) / 200);
+  const grow = clamp(t / ANVIL_HIT);
+  drawFloorShadow(buf, ax, ay, Math.round(3 + 10 * grow), (0.18 + 0.4 * grow) * alpha);
+  if (t < ANVIL_HIT) drawPose(buf, fx, { cx: ax, bottom: ay + FLOOR_Y, sx: 1, sy: 1 });
+  else drawPancake(buf, fx, ax, ay, t, alpha);
+  if (t >= ANVIL_FALL_FROM && t < ANVIL_LIFT + 260) drawAnvilShape(buf, ax, anvilTop(ay, t));
+  drawAnvilImpact(buf, ax, ay, t);
+  drawBits(buf, fx, ax, ay, t, false);
+}
+
+/* ------------------------------- 8. rocket ------------------------------- */
+
+const IGNITE = 200;
+const LIFTOFF = 320;
+const RISE_MS = 600;
+const PING_Y = 4;
+const ROCKET_ROWS = [
+  '...o...',
+  '..oRo..',
+  '..oRo..',
+  '.oRRRo.',
+  '.owwwo.',
+  '.owcwo.',
+  '.owwwo.',
+  '.okkko.',
+  '.owwwo.',
+  'RowwwoR',
+  'RRoooRR',
+  'oR.o.Ro',
+];
+
+/** Distance risen at time t; quadratic so it reads as accelerating. */
+function rocketLift(t: number, travel: number): number {
+  return travel * clamp((t - LIFTOFF) / RISE_MS) ** 2;
+}
+
+function drawSmoke(buf: PixelBuffer, ax: number, ay: number, t: number, travel: number): void {
+  const fade = 1 - clamp((t - 1000) / 200);
+  for (let k = 1; k <= 14; k++) {
+    const tk = t - k * 36;
+    if (tk < IGNITE) break;
+    const y = Math.round(ay + 20 - rocketLift(tk, travel));
+    const x = ax + Math.round((hash(k, 5) - 0.5) * k * 0.8);
+    buf.disc(x, y, 1 + k * 0.32, mix(0xf4f0e8, 0x6b7078, k / 14), 0.75 * (1 - k / 15) * fade);
+  }
+}
+
+function drawFlame(buf: PixelBuffer, x: number, y: number, t: number, extra: number): void {
+  const flick = hash(Math.floor(t / 35), 11);
+  const len = Math.round(5 + flick * 4 + extra);
+  const wid = flick > 0.5 ? 3 : 2;
+  buf.glow(x, y + 3, 9, EMBER, 0.55);
+  buf.fillConvex([{ x: x - wid, y }, { x: x + wid, y }, { x, y: y + len }], EMBER);
+  buf.fillConvex([{ x: x - 1, y }, { x: x + 1, y }, { x, y: y + len - 3 }], 0xffe27a);
+  buf.add(x, y, WHITE, 0.8);
+}
+
+/** The "ting" where the victim leaves the top of the screen. */
+function drawPing(buf: PixelBuffer, ax: number, ay: number, t: number, travel: number): void {
+  const at = LIFTOFF + RISE_MS * Math.sqrt(clamp((ay - PING_Y) / travel));
+  const age = t - at;
+  if (age < 0 || age > 260) return;
+  const u = age / 260;
+  buf.glow(ax, PING_Y, 8, CYAN, 0.6 * (1 - u));
+  drawTwinkle(buf, ax, PING_Y, Math.round(2 + 7 * Math.sin(u * Math.PI)), 1 - u * u);
+}
+
+function drawRocket(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const travel = ay + 34;
+  const lift = rocketLift(t, travel);
+  const rumble = t > IGNITE && lift < 1 ? Math.round((hash(Math.floor(t / 28), 2) - 0.5) * 2) : 0;
+  const x = ax + rumble;
+  const top = Math.round(ay + FLOOR_Y - lift + (1 - easeOut(clamp(t / 150))) * 14);
+  if (t >= IGNITE) drawSmoke(buf, ax, ay, t, travel);
+  paintRows(buf, ROCKET_ROWS, x - 3, top, { o: INK, R: RED, w: 0xe9edf2, c: 0x5fd8ff, k: fx.killer });
+  drawPose(buf, fx, { cx: x, bottom: ay + FLOOR_Y - lift, sx: 1, sy: lift > 0 ? 1.15 : 1 });
+  if (t >= IGNITE) drawFlame(buf, x, top + ROCKET_ROWS.length, t, lift > 0 ? 5 : 0);
+  drawPing(buf, ax, ay, t, travel);
+}
+
+/* ------------------------------ 9. confetti ------------------------------ */
+
+const CONFETTI_POP = 90;
+const PARTY_COLORS = [0xffd23f, 0x3ddc97, 0x4ecbff, 0xff5fa2, 0xffffff, 0xb78cff];
+
+function buildConfetti(fx: Effect): void {
+  const colors = [fx.killer, fx.killer, mix(fx.killer, WHITE, 0.5), ...PARTY_COLORS];
+  for (let i = 0; i < 70; i++) {
+    const angle = -Math.PI / 2 + rand(-1.6, 1.6);
+    const speed = rand(50, 170);
+    const color = pick(colors);
+    fx.bits.push(
+      makeBit({
+        x: 0,
+        y: CHEST_Y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        born: CONFETTI_POP + rand(0, 30),
+        life: rand(750, 1000),
+        drag: 3.2,
+        grav: 38,
+        c0: color,
+        c1: color,
+      }),
+    );
+  }
+  for (let i = 0; i < 5; i++) fx.spikes.push({ angle: -Math.PI / 2 + rand(-0.9, 0.9), len: rand(18, 32) });
+}
+
+/** Strips tumble edge-on and flat; drag plus a gentle fall gives a terminal velocity, so they flutter. */
+function drawStrips(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  for (let i = 0; i < fx.bits.length; i++) {
+    const b = fx.bits[i]!;
+    const age = t - b.born;
+    if (age < 0 || age > b.life) continue;
+    const u = age / b.life;
+    const s = age / 1000;
+    const f = (1 - Math.exp(-b.drag * s)) / b.drag;
+    const x = Math.round(ax + b.x + b.vx * f + Math.sin(age / 70 + i * 1.7) * 2 * u);
+    const y = Math.round(ay + b.y + b.vy * f + (b.grav / b.drag) * (s - f));
+    const turn = (Math.floor(age / 90) + i) % 3;
+    const alpha = 1 - u ** 3;
+    if (turn === 0) buf.rect(x, y, 2, 1, b.c0, alpha);
+    else if (turn === 1) buf.rect(x, y, 1, 2, b.c0, alpha);
+    else buf.blend(x, y, mix(b.c0, WHITE, 0.4), alpha);
+  }
+}
+
+function drawStreamers(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const age = t - CONFETTI_POP;
+  if (age < 0) return;
+  const fade = 1 - clamp((age - 500) / 400);
+  const drop = clamp((age - 150) / 600) ** 2 * 26;
+  for (let i = 0; i < fx.spikes.length; i++) {
+    const sp = fx.spikes[i]!;
+    const reach = easeOut(clamp(age / 320)) * sp.len;
+    let px = ax;
+    let py = ay + CHEST_Y;
+    for (let k = 1; k <= 8; k++) {
+      const s = k / 8;
+      const x = ax + Math.cos(sp.angle) * reach * s + Math.sin(s * 7 + age / 90 + i) * 2 * s;
+      const y = ay + CHEST_Y + Math.sin(sp.angle) * reach * s + drop * s * s;
+      buf.line(px, py, x, y, PARTY_COLORS[(i + (k >> 1)) % PARTY_COLORS.length]!, fade);
+      px = x;
+      py = y;
+    }
+  }
+}
+
+function drawConfetti(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  if (t < CONFETTI_POP) {
+    drawPose(buf, fx, { cx: ax, bottom: ay + FLOOR_Y - Math.round(2 * (t / CONFETTI_POP)), sx: 1, sy: 1 });
+  } else {
+    const u = clamp((t - CONFETTI_POP) / 120);
+    buf.glow(ax, ay + CHEST_Y, 14 * (1 - u) + 4, WHITE, 1 - u);
+    buf.ring(ax, ay + CHEST_Y, easeOut(u) * 16, WHITE, 1 - u, true);
+    buf.ring(ax, ay + CHEST_Y, easeOut(u) * 11, fx.killer, 1 - u, true);
+  }
+  drawStreamers(buf, fx, ax, ay, t);
+  drawStrips(buf, fx, ax, ay, t);
+}
+
+/* ------------------------------ 10. balloon ------------------------------ */
+
+const INFLATE_FROM = 40;
+const INFLATE_TO = 480;
+const BALLOON_POP = 820;
+const BALLOON_RX = 23;
+const BALLOON_RY = 31;
+
+function buildBalloon(fx: Effect): void {
+  const colors = [fx.killer, mix(fx.killer, WHITE, 0.4), fx.victim.color];
+  for (let i = 0; i < 24; i++) {
+    const a = rand(0, Math.PI * 2);
+    const speed = rand(30, 95);
+    fx.bits.push(
+      makeBit({
+        x: Math.cos(a) * BALLOON_RX * 0.9,
+        y: CHEST_Y + Math.sin(a) * BALLOON_RY * 0.9 - balloonLift(BALLOON_POP),
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed - 15,
+        born: BALLOON_POP + rand(0, 20),
+        life: rand(280, 420),
+        drag: 1.2,
+        grav: 130,
+        size: Math.random() < 0.5 ? 2 : 1,
+        c0: pick(colors),
+        c1: mix(fx.killer, VOID, 0.5),
+      }),
+    );
+  }
+}
+
+function balloonLift(t: number): number {
+  return 22 * clamp((t - 380) / 440) ** 1.4;
+}
+
+/** Whole-pixel half steps, so the swelling reads as a stop-motion inflate. */
+function balloonSize(t: number): number {
+  return 1 + Math.floor(easeOut(clamp((t - INFLATE_FROM) / (INFLATE_TO - INFLATE_FROM))) * 4.99) / 2;
+}
+
+/** The latex: a filled ellipse with a dark rim, so the stretched sprite reads as sitting inside a round balloon. */
+function drawLatex(buf: PixelBuffer, cx: number, cy: number, rx: number, ry: number, color: number): void {
+  for (let dy = -ry; dy <= ry; dy++) {
+    const half = Math.round(rx * Math.sqrt(Math.max(0, 1 - (dy / ry) ** 2)));
+    buf.rect(cx - half, cy + dy, half * 2 + 1, 1, mix(color, WHITE, 0.15 * (1 - (dy + ry) / (2 * ry))));
+    buf.blend(cx - half, cy + dy, mix(color, VOID, 0.6));
+    buf.blend(cx + half, cy + dy, mix(color, VOID, 0.6));
+  }
+}
+
+function drawBalloonBody(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const k = balloonSize(t);
+  const strain = clamp((t - INFLATE_TO) / (BALLOON_POP - INFLATE_TO));
+  const wobble = Math.sin(t / 45) * (0.04 + 0.06 * strain);
+  const sx = k * (1 + wobble);
+  const sy = k * (1 - wobble);
+  const cx = ax + Math.round(Math.sin(t / 130) * 1.5);
+  const cy = Math.round(ay + CHEST_Y - balloonLift(t));
+  const rx = Math.round(SPRITE_W * sx * 0.55);
+  const ry = Math.round(SPRITE_H * sy * 0.52);
+  drawLatex(buf, cx, cy, rx, ry, fx.killer);
+  drawPose(buf, fx, {
+    cx,
+    bottom: Math.round(cy + (SPRITE_H * sy) / 2),
+    sx,
+    sy,
+    alpha: 0.6,
+    mask: (u, v) => u * u + v * v <= 1.1,
+  });
+  buf.disc(cx - Math.round(rx * 0.45), cy - Math.round(ry * 0.5), Math.max(1, Math.round(rx * 0.14)), WHITE, 0.85);
+  const knotY = cy + ry;
+  buf.fillConvex([{ x: cx - 2, y: knotY + 3 }, { x: cx + 2, y: knotY + 3 }, { x: cx, y: knotY }], fx.killer);
+  for (let i = 0; i < 9; i++) buf.blend(cx + Math.round(Math.sin(i * 0.9 + t / 90) * 1.5), knotY + 3 + i, PALE, 0.8);
+}
+
+function drawBalloonPop(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const age = t - BALLOON_POP;
+  if (age < 0 || age > 300) return;
+  const u = age / 300;
+  const cy = ay + CHEST_Y - balloonLift(BALLOON_POP);
+  buf.disc(ax, cy, 11 * (1 - clamp(age / 70)), WHITE, 0.9, true);
+  buf.ring(ax, cy, easeOut(u) * 26, WHITE, 1 - u, true);
+  for (let i = 0; i < 4; i++) {
+    const a = i * 1.6 + 0.4;
+    const r = easeOut(u) * (8 + i * 3);
+    buf.disc(ax + Math.cos(a) * r, cy + Math.sin(a) * r, 3 - u * 2, 0xe9edf2, 0.8 * (1 - u));
+  }
+}
+
+function drawBalloon(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  if (t < BALLOON_POP) drawBalloonBody(buf, fx, ax, ay, t);
+  drawBalloonPop(buf, fx, ax, ay, t);
+  drawBits(buf, fx, ax, ay, t, false);
+}
+
+/* ------------------------------ 11. deleted ------------------------------ */
+
+const DEL_SNAP = 170;
+const DEL_GRAB = 420;
+const DEL_DROP = 800;
+const CURSOR_ROWS = [
+  'o........',
+  'oo.......',
+  'owo......',
+  'owwo.....',
+  'owwwo....',
+  'owwwwo...',
+  'owwwwwo..',
+  'owwwwwwo.',
+  'owwwwooo.',
+  'owowwo...',
+  'oo.owwo..',
+  'o..owwo..',
+  '....oo...',
+];
+const CAN_ROWS = [
+  '.ooooooo.',
+  '.oGdGdGo.',
+  '.oGdGdGo.',
+  '.oGdGdGo.',
+  '.oGdGdGo.',
+  '.oGdGdGo.',
+  '..oGdGo..',
+  '..ooooo..',
+];
+const LID_ROWS = ['....ooo....', 'ooooooooooo', 'oLLLLLLLLLo'];
+const CAN_COLORS = { o: INK, G: 0x8a94a3, d: 0x5b6572, L: 0xaab4c2 };
+
+/** Marching ants: the border flips between black and white as the phase advances. */
+function drawMarquee(buf: PixelBuffer, x: number, y: number, w: number, h: number, t: number): void {
+  const shift = Math.floor(t / 60);
+  buf.rect(x, y, w, h, 0x4aa3ff, 0.22);
+  const dot = (px: number, py: number, i: number): void => buf.blend(px, py, ((i + shift) & 3) < 2 ? BLACK : WHITE);
+  for (let i = 0; i < w; i++) {
+    dot(x + i, y, i);
+    dot(x + w - 1 - i, y + h - 1, i + w + h);
+  }
+  for (let i = 0; i < h; i++) {
+    dot(x + w - 1, y + i, i + w);
+    dot(x, y + h - 1 - i, i + 2 * w + h);
+  }
+}
+
+function lidLift(t: number): number {
+  if (t < DEL_DROP) return t > DEL_GRAB + 100 ? 3 : 0;
+  const age = t - DEL_DROP;
+  return Math.round(Math.abs(Math.sin(age / 55)) * 4 * Math.exp(-age / 160));
+}
+
+function drawCan(buf: PixelBuffer, x: number, bottom: number, t: number): void {
+  const appear = easeOut(clamp((t - 100) / 140));
+  const y = bottom - 11 + Math.round((1 - appear) * 12);
+  paintRows(buf, CAN_ROWS, x - 4, y + 3, CAN_COLORS);
+  paintRows(buf, LID_ROWS, x - 5, y - lidLift(t), CAN_COLORS);
+}
+
+function drawDeletedTag(buf: PixelBuffer, canX: number, top: number, t: number): void {
+  const age = t - (DEL_DROP + 40);
+  if (age < 0) return;
+  const fade = 1 - clamp((t - 1170) / 80);
+  const w = buf.textWidth('DELETED') + 6;
+  const x = clamp(Math.round(canX - w / 2), 1, buf.width - w - 1);
+  const y = Math.round(top - 12 - (1 - easeOut(clamp(age / 90))) * 6);
+  buf.rect(x - 1, y - 1, w + 2, 11, INK, fade);
+  buf.rect(x, y, w, 9, 0xe0283c, fade);
+  buf.text('DELETED', x + 3, y + 2, WHITE, fade);
+}
+
+function drawCursor(buf: PixelBuffer, fx: Effect, tipX: number, tipY: number, t: number): void {
+  const press = t > DEL_GRAB - 30 && t < DEL_GRAB + 60 ? 1 : 0;
+  buf.glow(tipX, tipY, 7, fx.killer, 0.5);
+  const click = t - DEL_GRAB;
+  if (click > 0 && click < 160) buf.ring(tipX, tipY, easeOut(click / 160) * 9, WHITE, 1 - click / 160, true);
+  paintRows(buf, CURSOR_ROWS, tipX + press, tipY + press, { o: BLACK, w: WHITE });
+}
+
+function drawDeleted(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const side = ax + 28 < buf.width - 8 ? 1 : -1;
+  const canX = ax + side * 28;
+  const canTop = ay + FLOOR_Y - 11;
+  const p = easeInOut(clamp((t - DEL_GRAB) / (DEL_DROP - DEL_GRAB)));
+  const s = 1 - 0.72 * p;
+  const vx = Math.round(ax + (canX - ax) * p);
+  const bottom = Math.round(ay + FLOOR_Y - 7 * p - Math.sin(p * Math.PI) * 12);
+  const centerY = bottom - Math.round((SPRITE_H * s) / 2);
+  if (t < DEL_DROP) {
+    drawPose(buf, fx, { cx: vx, bottom, sx: s, sy: s });
+    const snap = Math.round(14 * (1 - easeOut(clamp(t / DEL_SNAP))));
+    const w = Math.round(SPRITE_W * s) + 4 + snap;
+    const h = Math.round(SPRITE_H * s) + 4 + snap;
+    drawMarquee(buf, vx - (w >> 1), centerY - (h >> 1), w, h, t);
+  }
+  drawCan(buf, canX, ay + FLOOR_Y, t);
+  drawDeletedTag(buf, canX, canTop, t);
+  const grab = easeOut(clamp((t - 120) / (DEL_GRAB - 120)));
+  const tipX = t < DEL_GRAB ? Math.round(ax - side * 20 + (ax + 1 - (ax - side * 20)) * grab) : vx + 1;
+  const tipY = t < DEL_GRAB ? Math.round(ay + 26 + (ay - 1 - (ay + 26)) * grab) : centerY - 1;
+  if (t >= 120 && t < DEL_DROP + 120) drawCursor(buf, fx, tipX, tipY, t);
+}
+
+/* ------------------------------- 12. ghost ------------------------------- */
+
+const SLUMP_MS = 280;
+const GHOST_FROM = 250;
+const GHOST_ROWS_A = [
+  '...ooooo...',
+  '..owwwwwo..',
+  '.owwwwwwwo.',
+  '.owwwwwwwo.',
+  '.owkwwwkwo.',
+  '.owkwwwkwo.',
+  '.owwwowwwo.',
+  '.owwwwwwwo.',
+  '.owwwwwwwo.',
+  '.owwwwwwwo.',
+  '.owwwwwwwo.',
+  '.owwwwwwwo.',
+  '.owwowwowo.',
+  '..o.o.o.o..',
+];
+const GHOST_ROWS_B = [...GHOST_ROWS_A.slice(0, 12), '.oowwowwoo.', '...o.o.o...'];
+const GHOST_COLORS = { o: 0x9fc0ff, w: 0xf4f8ff, k: INK };
+const HARP_NOTES = [392, 440, 523, 587, 659, 784, 880, 1047, 1175, 1319];
+
+function ghostLift(t: number): number {
+  if (t < 700) return 16 * easeOut(clamp((t - GHOST_FROM) / 450));
+  const s = (t - 700) / 1000;
+  return 16 + 20 * s + 45 * s * s;
+}
+
+function drawSlump(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  const u = easeOut(clamp(t / SLUMP_MS));
+  const alpha = 1 - 0.7 * clamp((t - 1000) / 300);
+  drawPose(buf, fx, {
+    cx: ax,
+    bottom: ay + FLOOR_Y,
+    sx: 1 + 0.06 * u,
+    sy: 1 - 0.2 * u,
+    alpha,
+    paint: (color) => mix(color, mix(grey(color), 0x3a3f48, 0.3), u),
+  });
+}
+
+function drawGhostWave(buf: PixelBuffer, x: number, y: number, t: number): void {
+  const up = Math.floor(t / 130) % 2 === 0;
+  const handY = up ? y + 2 : y + 5;
+  buf.line(x + 10, y + 8, x + 13, handY + 1, 0x9fc0ff, 0.8);
+  buf.rect(x + 13, handY, 2, 2, 0xf4f8ff, 0.9);
+}
+
+function drawGhost(buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number): void {
+  drawSlump(buf, fx, ax, ay, t);
+  if (t < GHOST_FROM) return;
+  const lift = ghostLift(t);
+  const alpha = 0.8 * clamp((t - GHOST_FROM) / 150) * (1 - clamp((t - 1050) / 250));
+  const sway = Math.round(Math.sin(t / 160) * 2 * clamp((t - 400) / 300));
+  const x = ax - 5 + sway;
+  const y = Math.round(ay - 10 - lift);
+  const rows = Math.floor(t / 150) % 2 === 0 ? GHOST_ROWS_A : GHOST_ROWS_B;
+  paintRows(buf, rows, x, y, GHOST_COLORS, alpha);
+  if (t > 520 && t < 1050) drawGhostWave(buf, x, y, t);
+  for (let i = 0; i < 3; i++) {
+    const age = (t + i * 190) % 560;
+    if (age < 200) drawTwinkle(buf, x + 5 + Math.round((hash(i, 21) - 0.5) * 22), y + Math.round(hash(i, 22) * 14), 2, Math.sin((age / 200) * Math.PI) * alpha);
+  }
+}
+
 /* ------------------------------ registry --------------------------------- */
 
 type Draw = (buf: PixelBuffer, fx: Effect, ax: number, ay: number, t: number) => void;
@@ -583,6 +1194,12 @@ const BUILD: Record<FinisherId, (fx: Effect) => void> = {
   ash: buildAsh,
   singularity: buildSingularity,
   storm: buildStorm,
+  anvil: buildAnvil,
+  rocket: () => undefined,
+  confetti: buildConfetti,
+  balloon: buildBalloon,
+  deleted: () => undefined,
+  ghost: () => undefined,
 };
 
 const DRAW: Record<FinisherId, Draw> = {
@@ -592,6 +1209,12 @@ const DRAW: Record<FinisherId, Draw> = {
   ash: drawAsh,
   singularity: drawSingularity,
   storm: drawStorm,
+  anvil: drawAnvil,
+  rocket: drawRocket,
+  confetti: drawConfetti,
+  balloon: drawBalloon,
+  deleted: drawDeleted,
+  ghost: drawGhost,
 };
 
 const DURATION: Record<FinisherId, number> = {
@@ -601,6 +1224,12 @@ const DURATION: Record<FinisherId, number> = {
   ash: 1300,
   singularity: 1100,
   storm: 800,
+  anvil: 1250,
+  rocket: 1200,
+  confetti: 1100,
+  balloon: 1250,
+  deleted: 1250,
+  ghost: 1300,
 };
 
 const SHAKE: Record<FinisherId, number> = {
@@ -610,7 +1239,23 @@ const SHAKE: Record<FinisherId, number> = {
   ash: 0.5,
   singularity: 3,
   storm: 2,
+  anvil: 3.5,
+  rocket: 0,
+  confetti: 0,
+  balloon: 0,
+  deleted: 1,
+  ghost: 0,
 };
+
+/**
+ * Ms after spawn at which the shake should kick in: the anvil lands and the can
+ * lid slams well after the effect starts, and a shake at t=0 would miss them.
+ */
+export function finisherShakeDelay(kind: FinisherId): number {
+  return SHAKE_DELAY[kind] ?? 0;
+}
+
+const SHAKE_DELAY: Partial<Record<FinisherId, number>> = { anvil: ANVIL_HIT, deleted: DEL_DROP };
 
 export class Finishers {
   private live: Effect[] = [];
@@ -634,12 +1279,14 @@ export class Finishers {
       }
     }
 
+    const body = bodyPixels(art, flip);
     const fx: Effect = {
       kind,
       start: now,
       victim,
       killer: killerColor,
-      body: bodyPixels(art, flip),
+      body,
+      grid: bodyGrid(body),
       dirX,
       dirY,
       hasDir,
@@ -691,7 +1338,7 @@ function noiseFor(ctx: AudioContext): AudioBuffer {
   return buffer;
 }
 
-interface Voice {
+export interface Voice {
   tone(type: OscillatorType, f0: number, f1: number, at: number, dur: number, gain: number, attack?: number): void;
   hiss(type: BiquadFilterType, f0: number, f1: number, at: number, dur: number, gain: number, attack?: number): void;
 }
@@ -700,7 +1347,7 @@ interface Voice {
  * Times are authored for rate 1; slow motion stretches them and drops pitch,
  * so a killcam finisher sounds like the same sound played on a slow tape.
  */
-function createVoice(ctx: AudioContext, out: AudioNode, rate: number): Voice {
+export function createVoice(ctx: AudioContext, out: AudioNode, rate: number): Voice {
   const r = Math.max(0.1, rate);
   const stretch = 1 / r;
   const base = ctx.currentTime;
@@ -785,6 +1432,57 @@ function stormSound(v: Voice): void {
   v.tone('sawtooth', 2600, 180, 0, 0.14, 0.1, 0.002);
 }
 
+function anvilSound(v: Voice): void {
+  v.tone('sine', 2300, 850, 0.15, 0.33, 0.07, 0.05);
+  v.tone('sine', 2340, 880, 0.15, 0.33, 0.04, 0.05);
+  v.tone('sine', 80, 38, 0.48, 0.25, 0.2);
+  v.tone('square', 190, 150, 0.48, 0.2, 0.08);
+  v.tone('triangle', 520, 400, 0.48, 0.32, 0.1);
+  v.tone('sine', 1320, 1320, 0.48, 0.45, 0.04);
+  v.hiss('highpass', 4000, 4000, 0.48, 0.05, 0.12);
+}
+
+function rocketSound(v: Voice): void {
+  v.hiss('bandpass', 250, 3200, 0.2, 0.7, 0.14, 0.15);
+  v.tone('sawtooth', 80, 520, 0.28, 0.6, 0.06, 0.2);
+  v.hiss('lowpass', 900, 900, 0.2, 0.12, 0.1);
+  v.tone('sine', 2900, 2900, 0.82, 0.18, 0.08);
+  v.tone('sine', 4350, 4350, 0.84, 0.1, 0.04);
+}
+
+function confettiSound(v: Voice): void {
+  v.hiss('highpass', 1800, 6000, 0.09, 0.08, 0.14, 0.002);
+  v.tone('sine', 380, 70, 0.09, 0.09, 0.16, 0.002);
+  v.tone('sawtooth', 294, 247, 0.14, 0.32, 0.06, 0.02);
+  v.tone('sawtooth', 298, 249, 0.14, 0.32, 0.05, 0.02);
+  v.hiss('bandpass', 1200, 1000, 0.14, 0.3, 0.05, 0.02);
+  for (let i = 0; i < 8; i++) v.tone('sine', rand(2500, 5200), rand(2500, 5200), rand(0.25, 0.8), 0.07, 0.03);
+}
+
+function balloonSound(v: Voice): void {
+  for (let i = 0; i < 5; i++) {
+    v.tone('triangle', 420 + i * 150, 620 + i * 200, 0.05 + i * 0.09, 0.08, 0.08, 0.01);
+    v.hiss('bandpass', 2400, 2800, 0.05 + i * 0.09, 0.07, 0.03, 0.01);
+  }
+  v.hiss('highpass', 6000, 6000, 0.82, 0.07, 0.2, 0.001);
+  v.tone('square', 220, 60, 0.82, 0.05, 0.1, 0.001);
+}
+
+function deletedSound(v: Voice): void {
+  v.tone('square', 330, 330, 0.05, 0.12, 0.07, 0.003);
+  v.tone('square', 247, 247, 0.17, 0.18, 0.07, 0.003);
+  v.hiss('highpass', 3500, 3500, 0.42, 0.015, 0.06, 0.001);
+  for (let i = 0; i < 9; i++) v.hiss('highpass', 2500, 1500, 0.8 + i * 0.03, 0.03, 0.08, 0.001);
+  v.tone('sine', 150, 60, 0.82, 0.12, 0.14);
+}
+
+function ghostSound(v: Voice): void {
+  HARP_NOTES.forEach((f, i) => {
+    v.tone('sine', f, f, 0.25 + i * 0.07, 0.55, 0.07, 0.005);
+    v.tone('triangle', f * 2, f * 2, 0.25 + i * 0.07, 0.35, 0.02, 0.005);
+  });
+}
+
 const SOUNDS: Record<FinisherId, (v: Voice) => void> = {
   shatter: shatterSound,
   supernova: supernovaSound,
@@ -792,6 +1490,12 @@ const SOUNDS: Record<FinisherId, (v: Voice) => void> = {
   ash: ashSound,
   singularity: singularitySound,
   storm: stormSound,
+  anvil: anvilSound,
+  rocket: rocketSound,
+  confetti: confettiSound,
+  balloon: balloonSound,
+  deleted: deletedSound,
+  ghost: ghostSound,
 };
 
 /** Synthesised sound per finisher on the shared bus. `rate` < 1 = slow motion. */

@@ -4,6 +4,8 @@ import {
   DEFAULT_FINISHER,
   FINISHERS,
   FINISHER_NAMES,
+  FUNNY_FINISHERS,
+  KILLCAM_MS,
   MAX_PLAYERS,
   PLAYER_RADIUS,
   PLAYER_COLORS,
@@ -14,7 +16,18 @@ import {
   isFinisher,
   type FinisherId,
 } from '../shared/constants.js';
-import { clampToArena } from '../shared/arena.js';
+import { arenaSize } from '../shared/arena.js';
+import {
+  MAP_BLURBS,
+  MAP_IDS,
+  MAP_NAMES,
+  collide,
+  layoutFor,
+  openWorld,
+  padUnder,
+  teleportStep,
+  type MapChoice,
+} from '../shared/maps.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { ServerMessage, Standing } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
@@ -23,6 +36,8 @@ import { calloutFor, killerOf } from './callouts.js';
 import { finisherSound, previewFinisher } from './finishers.js';
 import { Input, touchDevice } from './input.js';
 import { beatAt, type KillcamBeat } from './killcam.js';
+import { finaleSound, killscreenSound } from './killscreen.js';
+import { obstacleSound } from './obstacles.js';
 import { Music } from './music.js';
 import { Net } from './net.js';
 import { Prediction } from './prediction.js';
@@ -61,6 +76,12 @@ const dom = {
   finisherPicks: el('lobby-finishers'),
   finisherPreview: el<HTMLCanvasElement>('finisher-preview'),
   btnMusic: el<HTMLButtonElement>('btn-music'),
+  mapName: el('map-name'),
+  mapBlurb: el('map-blurb'),
+  mapPicks: el('lobby-maps'),
+  botRow: el('lobby-bots'),
+  btnBot: el<HTMLButtonElement>('btn-bot'),
+  btnBotLevel: el<HTMLButtonElement>('btn-bot-level'),
   btnPublic: el<HTMLButtonElement>('btn-public'),
   btnCreate: el<HTMLButtonElement>('btn-create'),
   btnReady: el<HTMLButtonElement>('btn-ready'),
@@ -96,6 +117,7 @@ const scene: Scene = {
   inMatch: false,
   showdown: false,
   killcam: null,
+  world: openWorld(STANDARD_ARENA),
 };
 
 let panel: 'menu' | 'lobby' | 'result' | null = 'menu';
@@ -104,10 +126,14 @@ let countdownEndsAt: number | null = null;
 let ready = false;
 /** The result card waits for the final beams to clear; a new match cancels it. */
 let resultTimer = 0;
+/** Between the match ending and the result card: the lobby must not cut in. */
+let resultPending = false;
 let leavingResult = false;
 let lastStep = 0;
 /** Set once the final position of a blackout has been sent. */
 let locked = false;
+/** The teleporter pad the fighter is standing on and has already used, if any. */
+let onPad: string | null = null;
 /** Fighters still standing as of the last lights, to spot the drop to two. */
 let lastRemaining = 0;
 let bloodDrawn = false;
@@ -198,14 +224,44 @@ function pickFinisher(next: FinisherId): void {
   if (panel === 'lobby') preview();
 }
 
-const finisherPicks = FINISHERS.map((kind) => {
+/** Classic first, then the cartoon ones, each under its own small heading. */
+const finisherPicks = [false, true].flatMap((funny) => {
+  const heading = document.createElement('span');
+  heading.className = 'group';
+  heading.textContent = funny ? 'Funny' : 'Classic';
+  dom.finisherPicks.append(heading);
+  return FINISHERS.filter((kind) => FUNNY_FINISHERS.includes(kind) === funny).map((kind) => {
+    const button = document.createElement('button');
+    button.className = 'key';
+    button.textContent = FINISHER_NAMES[kind];
+    button.addEventListener('click', () => pickFinisher(kind));
+    dom.finisherPicks.append(button);
+    return { kind, button };
+  });
+});
+
+const BOT_LEVELS = ['easy', 'normal', 'hard'] as const;
+let botLevel: (typeof BOT_LEVELS)[number] = 'normal';
+let isHost = false;
+
+/** Random first, then every arena. Only the host's buttons do anything. */
+const mapPicks = (['random', ...MAP_IDS] as MapChoice[]).map((map) => {
   const button = document.createElement('button');
   button.className = 'key';
-  button.textContent = FINISHER_NAMES[kind];
-  button.addEventListener('click', () => pickFinisher(kind));
-  dom.finisherPicks.append(button);
-  return { kind, button };
+  button.textContent = map === 'random' ? 'Random' : MAP_NAMES[map];
+  button.addEventListener('click', () => net.send({ t: 'map', map }));
+  dom.mapPicks.append(button);
+  return { map, button };
 });
+
+function showMap(choice: MapChoice, host: boolean, party: boolean): void {
+  dom.mapName.textContent = choice === 'random' ? 'Random' : MAP_NAMES[choice];
+  dom.mapBlurb.textContent = choice === 'random' ? 'A different arena every match.' : MAP_BLURBS[choice];
+  for (const { map, button } of mapPicks) {
+    button.classList.toggle('mine', map === choice);
+    button.disabled = !host || !party;
+  }
+}
 
 function showFinisher(): void {
   dom.finisherName.textContent = FINISHER_NAMES[finisher];
@@ -243,6 +299,10 @@ function handle(msg: ServerMessage): void {
       dom.lobbyCount.textContent = `${msg.players.length}/${MAX_PLAYERS}`;
       dom.btnStart.hidden = !msg.code || !msg.host;
       dom.btnStart.disabled = msg.players.length < 2;
+      isHost = msg.host;
+      dom.botRow.hidden = !msg.code || !msg.host;
+      dom.btnBot.disabled = msg.players.length >= MAX_PLAYERS;
+      showMap(msg.map, msg.host, msg.code !== null);
       dom.btnReady.classList.toggle('on', ready);
       dom.btnReady.textContent = ready ? 'Ready ×' : 'Ready';
 
@@ -263,17 +323,18 @@ function handle(msg: ServerMessage): void {
           row.classList.toggle('ready', p.ready);
           const tag = document.createElement('span');
           tag.className = 'tag';
-          tag.textContent = p.ready ? 'Ready' : 'Standby';
+          tag.textContent = p.bot ? 'Bot' : p.ready ? 'Ready' : 'Standby';
           row.append(swatch(p.color), document.createTextNode(p.name));
           if (p.wins > 0) row.append(label('wins', `${p.wins}W`));
           row.append(tag);
+          if (p.bot && isHost && msg.code) row.append(kickButton(p.id));
           return row;
         }),
       );
 
       // The room drops back to its lobby the moment a match ends, which must
       // not yank the result card out from under the player.
-      if (!scene.inMatch && (panel !== 'result' || leavingResult)) {
+      if (!scene.inMatch && !resultPending && (panel !== 'result' || leavingResult)) {
         leavingResult = false;
         show('lobby');
       }
@@ -288,6 +349,11 @@ function handle(msg: ServerMessage): void {
         ]),
       );
       scene.baseSize = ARENA_BASE_SIZE[msg.startCount] ?? STANDARD_ARENA;
+      scene.world = {
+        size: scene.baseSize,
+        layout: layoutFor(msg.map, arenaSize(msg.startCount, 0)),
+        broken: new Set(),
+      };
       scene.scorches = [];
       scene.watch = [];
       scene.spectating = false;
@@ -300,6 +366,7 @@ function handle(msg: ServerMessage): void {
       music.start();
       countdownEndsAt = null;
       clearTimeout(resultTimer);
+      resultPending = false;
       renderer.configure(scene.baseSize);
       renderer.clearEffects();
       show(null);
@@ -311,6 +378,8 @@ function handle(msg: ServerMessage): void {
       const shrinking = scene.lights !== null && msg.size !== msg.previousSize;
       const entering = msg.remaining === 2 && !msg.replay && (lastRemaining > 2 || msg.round === 0);
       lastRemaining = msg.remaining;
+      const before = scene.world;
+      scene.world = { ...before, size: msg.size, broken: new Set(msg.broken) };
       scene.lights = msg;
       scene.lightsAt = now;
       scene.phase = 'lights';
@@ -327,7 +396,13 @@ function handle(msg: ServerMessage): void {
 
       // The match-ending round is told by the killcam, not the usual reveal.
       if (msg.replay) {
-        scene.killcam = { startedAt: now, lights: msg, spawned: false };
+        const intact = new Set(msg.broken.filter((id) => !msg.resolution?.broken.includes(id)));
+        scene.killcam = {
+          startedAt: now,
+          lights: msg,
+          spawned: false,
+          world: { ...scene.world, size: before.size, broken: intact },
+        };
         cueBeat = null;
         return;
       }
@@ -354,7 +429,8 @@ function handle(msg: ServerMessage): void {
       // The snapshot showed where you fired from; start moving from where the
       // shrunken wall actually left you.
       if (scene.self && scene.lights) {
-        const inside = clampToArena(scene.self, scene.lights.size, PLAYER_RADIUS);
+        const inside = collide(scene.self, PLAYER_RADIUS, scene.world);
+        onPad = padUnder(inside, scene.world);
         scene.self.x = inside.x;
         scene.self.y = inside.y;
       }
@@ -380,16 +456,14 @@ function handle(msg: ServerMessage): void {
       // The final reveal has already played, so drop the round and let the
       // arena behind the result card go back to full size.
       scene.inMatch = false;
-      scene.lights = null;
       scene.spectating = false;
       scene.showdown = false;
-      renderer.clearEffects();
       sfx.stopHum();
       music.stop();
 
       const won = msg.winner === scene.selfId;
       const champion = msg.winner ? scene.roster.get(msg.winner) : undefined;
-      if (won) sfx.win();
+      if (!scene.killcam && won) sfx.win();
       dom.resultStats.textContent = personalStats(msg.standings.find((s) => s.id === scene.selfId));
 
       dom.resultTitle.textContent = won ? 'Victory' : champion ? 'Eliminated' : 'Draw';
@@ -425,10 +499,16 @@ function handle(msg: ServerMessage): void {
         }),
       );
 
+      // The result card waits for the killcam to play out, finale card and all.
+      const killcamLeft = scene.killcam ? scene.killcam.startedAt + KILLCAM_MS - performance.now() : 0;
+      resultPending = true;
       resultTimer = window.setTimeout(() => {
+        resultPending = false;
         scene.killcam = null;
+        scene.lights = null;
+        renderer.clearEffects();
         if (!scene.inMatch) show('result');
-      }, 700);
+      }, Math.max(0, killcamLeft) + 450);
       return;
     }
 
@@ -447,11 +527,12 @@ function reveal(msg: Extract<ServerMessage, { t: 'lights' }>, resolution: Resolu
   renderer.reveal(now);
   sfx.clack();
   window.setTimeout(() => sfx.impact(), 150);
+  if (resolution.beams.some((b) => b.segments.length > 1)) window.setTimeout(() => roomSound('bounce'), 120);
   buzz(12);
 
   const killers = new Set(resolution.kills.map((k) => k.shooter));
   for (const beam of resolution.beams) {
-    if (killers.has(beam.id)) scene.scorches.push(beam);
+    if (killers.has(beam.id)) scene.scorches.push(...beam.segments);
   }
   if (resolution.eliminated.includes(scene.selfId)) {
     flashRed();
@@ -479,6 +560,12 @@ function aftermath(msg: Extract<ServerMessage, { t: 'lights' }>, resolution: Res
     const b = msg.players.find((p) => p.id === duel.b);
     if (a && b) renderer.sparks((a.x + b.x) / 2, (a.y + b.y) / 2, now);
   }
+
+  for (const id of resolution.broken) {
+    const crate = scene.world.layout.obstacles.find((o) => o.id === id);
+    if (crate?.kind === 'crate') renderer.crateBroken(crate, now);
+  }
+  if (resolution.broken.length > 0) roomSound('crate');
 
   playFinishers(resolution, 1);
   if (resolution.duels.length > 0) sfx.clash();
@@ -524,14 +611,21 @@ function killcamCues(now: number): void {
   const { beat } = beatAt(now - kc.startedAt);
   if (beat === cueBeat) return;
   cueBeat = beat;
+  const ctx = sfx.context;
+  const out = sfx.output;
   if (beat === 'intro') sfx.rewind();
   else if (beat === 'shot') sfx.slowSnap();
   else if (beat === 'freeze') {
     sfx.heartbeat();
     buzz(60);
+  } else if (beat === 'cutin') {
+    if (ctx && out) killscreenSound(ctx, out);
+    buzz([40, 30, 40]);
   } else if (beat === 'boom' && kc.lights.resolution) {
     playFinishers(kc.lights.resolution, 0.5);
     buzz(140);
+  } else if (beat === 'finale' && ctx && out) {
+    finaleSound(ctx, out, kc.lights.players.some((p) => p.alive && p.id === scene.selfId));
   }
 }
 
@@ -543,6 +637,21 @@ function personalStats(standing: Standing | undefined): string {
   const nemesis = standing.killedBy ? scene.roster.get(standing.killedBy) : undefined;
   if (nemesis) parts.push(`taken out by ${nemesis.name}`);
   return parts.join(' \u00b7 ');
+}
+
+function roomSound(kind: 'crate' | 'teleport' | 'bounce'): void {
+  const ctx = sfx.context;
+  const out = sfx.output;
+  if (ctx && out) obstacleSound(kind, ctx, out);
+}
+
+function kickButton(id: string): HTMLElement {
+  const button = document.createElement('button');
+  button.className = 'kick';
+  button.textContent = '\u00d7';
+  button.title = 'Remove bot';
+  button.addEventListener('click', () => net.send({ t: 'bot', add: false, id }));
+  return button;
 }
 
 function label(className: string, text: string): HTMLElement {
@@ -582,9 +691,16 @@ function loop(now: number): void {
 
   if (scene.phase === 'dark' && scene.lights) {
     if (scene.self && !frozen) {
-      const moved = stepPlayer(scene.self, dir.x, dir.y, dt, scene.lights.size);
-      scene.self.x = moved.x;
-      scene.self.y = moved.y;
+      const moved = stepPlayer(scene.self, dir.x, dir.y, dt, scene.world);
+      const jump = teleportStep(moved, scene.world, onPad);
+      onPad = jump.onPad;
+      if (jump.jumped) {
+        renderer.teleported(moved, jump, scene.roster.get(scene.selfId)?.color ?? 0xccd6e2, now);
+        roomSound('teleport');
+        buzz(20);
+      }
+      scene.self.x = jump.x;
+      scene.self.y = jump.y;
 
       const target = renderer.worldFromScreen(input.pointer.x, input.pointer.y);
       scene.self.aim = Math.atan2(target.y - scene.self.y, target.x - scene.self.x);
@@ -663,6 +779,11 @@ dom.btnAgain.addEventListener('click', () => {
   net.send({ t: 'again' });
 });
 dom.btnLeave.addEventListener('click', () => location.reload());
+dom.btnBot.addEventListener('click', () => net.send({ t: 'bot', add: true, difficulty: botLevel }));
+dom.btnBotLevel.addEventListener('click', () => {
+  botLevel = BOT_LEVELS[(BOT_LEVELS.indexOf(botLevel) + 1) % BOT_LEVELS.length]!;
+  dom.btnBotLevel.textContent = `Level: ${botLevel}`;
+});
 dom.btnMusic.addEventListener('click', () => {
   music.toggleMute();
   showMusic();

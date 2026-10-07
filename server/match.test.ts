@@ -1,12 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inradius } from '../shared/arena.js';
 import { BARREL_LENGTH, KILLCAM_MS, PLAYER_RADIUS, TICK_MS } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
+import { layoutFor, type MapId } from '../shared/maps.js';
 import { Match } from './match.js';
 
 const ROSTER: LobbyPlayer[] = [
-  { id: 'a', name: 'A', color: '#ff0000', ready: true, finisher: 'shatter', wins: 0 },
-  { id: 'b', name: 'B', color: '#00ff00', ready: true, finisher: 'storm', wins: 0 },
+  { id: 'a', name: 'A', color: '#ff0000', ready: true, finisher: 'shatter', wins: 0, bot: false },
+  { id: 'b', name: 'B', color: '#00ff00', ready: true, finisher: 'storm', wins: 0, bot: false },
 ];
 
 describe('Match', () => {
@@ -147,7 +148,7 @@ describe('Match', () => {
     const reach = (p: { x: number; y: number }) =>
       Math.max(Math.abs(p.x), Math.abs(p.y), (Math.abs(p.x) + Math.abs(p.y)) * Math.SQRT1_2);
     const fired = find('a');
-    const beam = lights.resolution!.beams.find((b) => b.id === 'a')!;
+    const beam = lights.resolution!.beams.find((b) => b.id === 'a')!.segments[0]!;
     const muzzle = Math.hypot(beam.ox - fired.x, beam.oy - fired.y);
     expect(muzzle).toBeCloseTo(BARREL_LENGTH, 6);
     expect(reach(fired)).toBeGreaterThan(inradius(lights.size) - PLAYER_RADIUS);
@@ -261,5 +262,126 @@ describe('Match', () => {
 
     expect(find('b').x).toBeCloseTo(b.x, 6);
     expect(lights.resolution!.eliminated).toEqual(['b']);
+  });
+
+  /** Starts a fresh match on `map`, with the spawn ring turned to `spin` radians. */
+  function startOn(map: MapId, spin: number): void {
+    sent = [];
+    clock = 1000;
+    vi.spyOn(Math, 'random').mockReturnValueOnce(spin / (Math.PI * 2));
+    match = new Match(ROSTER, (msg) => sent.push(msg), clock, map);
+    vi.restoreAllMocks();
+  }
+
+  describe('on a map with obstacles', () => {
+    it('announces the map', () => {
+      startOn('warehouse', 0);
+      expect(sent.find((m) => m.t === 'match')).toMatchObject({ map: 'warehouse' });
+    });
+
+    it('keeps broken crates broken across rounds', () => {
+      startOn('warehouse', 0);
+      const crate = layoutFor('warehouse', 720).obstacles.find((o) => o.id === 'crate-1')!;
+      if (crate.kind !== 'crate') throw new Error('crate-1 is not a crate');
+
+      runUntil('dark');
+      runUntil('lights');
+      const a = find('a');
+      runUntil('dark');
+      match.input('a', 0, 0, 0, Math.atan2(crate.y - a.y, crate.x - a.x));
+      match.input('b', 0, 0, 0, Math.PI / 2);
+      const first = runUntil('lights');
+      expect(first.resolution!.broken).toContain('crate-1');
+      expect(first.broken).toContain('crate-1');
+
+      runUntil('dark');
+      const second = runUntil('lights');
+      expect(second.broken).toContain('crate-1');
+      expect(second.resolution!.broken).not.toContain('crate-1');
+    });
+
+    it('drags an idle player along a conveyor during the blackout', () => {
+      // A spawn at (-0.62 R, 0) lies on the vertical belt that runs towards -y.
+      startOn('factory', Math.PI);
+      const start = find('a');
+      expect(start.x).toBeLessThan(-200);
+      runUntil('dark');
+      const lights = runUntil('lights');
+      const after = lights.players.find((p) => p.id === 'a')!;
+      expect(after.y).toBeLessThan(start.y - 60);
+      expect(after.x).toBeCloseTo(start.x, 3);
+    });
+
+    it('drags a disconnected body too', () => {
+      startOn('factory', Math.PI);
+      const start = find('a');
+      runUntil('dark');
+      match.disconnect('a');
+      const after = runUntil('lights').players.find((p) => p.id === 'a')!;
+      expect(after.y).toBeLessThan(start.y - 60);
+    });
+
+    it('does not drag anyone on an open map', () => {
+      startOn('reactor', Math.PI);
+      const start = find('a');
+      runUntil('dark');
+      const after = runUntil('lights').players.find((p) => p.id === 'a')!;
+      expect(after.y).toBeCloseTo(start.y, 6);
+    });
+
+    it('teleports a player who walks onto a pad, and accepts reports from the far side', () => {
+      startOn('lab', Math.PI);
+      const start = find('a');
+      const pad0 = layoutFor('lab', 720).obstacles.find((o) => o.id === 'pad-0')!;
+      const pad1 = layoutFor('lab', 720).obstacles.find((o) => o.id === 'pad-1')!;
+      if (pad0.kind !== 'teleporter' || pad1.kind !== 'teleporter') throw new Error('pads expected');
+      expect(Math.hypot(start.x - pad0.x, start.y - pad0.y)).toBeGreaterThan(pad0.r);
+
+      runUntil('dark');
+      const heading = Math.atan2(pad0.y - start.y, pad0.x - start.x);
+      match.input('a', 1, Math.cos(heading), Math.sin(heading), start.aim);
+      advance(160);
+      match.input('a', 2, 0, 0, start.aim, { x: pad1.x, y: pad1.y }, clock);
+      const after = runUntil('lights').players.find((p) => p.id === 'a')!;
+      expect(Math.hypot(after.x - pad1.x, after.y - pad1.y)).toBeLessThan(1);
+    });
+
+    it('does not fire the pad a player starts a blackout standing on', () => {
+      startOn('lab', Math.PI);
+      const pads = layoutFor('lab', 720).obstacles.filter((o) => o.kind === 'teleporter');
+      const pad0 = pads.find((o) => o.id === 'pad-0')!;
+      const pad1 = pads.find((o) => o.id === 'pad-1')!;
+      if (pad0.kind !== 'teleporter' || pad1.kind !== 'teleporter') throw new Error('pads expected');
+
+      // Reporting a spot on pad-0 sends a to pad-1 during the first blackout.
+      runUntil('dark');
+      advance(100);
+      match.input('a', 1, 0, 0, 0, { x: pad0.x, y: pad0.y }, clock);
+      const first = runUntil('lights').players.find((p) => p.id === 'a')!;
+      expect(Math.hypot(first.x - pad1.x, first.y - pad1.y)).toBeLessThan(1);
+
+      // The next blackout begins on pad-1: idling there must not bounce a back.
+      runUntil('dark');
+      const second = runUntil('lights').players.find((p) => p.id === 'a')!;
+      expect(Math.hypot(second.x - pad1.x, second.y - pad1.y)).toBeLessThan(1);
+    });
+
+    it('counts a beam that bounces back as a death, not a kill', () => {
+      // a stands on the normal of mirror-0 and fires at its centre, so the beam returns to a.
+      startOn('mirrors', -0.2127);
+      const mirror = layoutFor('mirrors', 720).obstacles.find((o) => o.id === 'mirror-0')!;
+      if (mirror.kind !== 'mirror') throw new Error('mirror expected');
+      const a = find('a');
+      const centre = { x: (mirror.ax + mirror.bx) / 2, y: (mirror.ay + mirror.by) / 2 };
+
+      runUntil('dark');
+      match.input('a', 0, 0, 0, Math.atan2(centre.y - a.y, centre.x - a.x));
+      match.input('b', 0, 0, 0, Math.PI / 2 + 0.3);
+      const lights = runUntil('lights');
+      expect(lights.resolution!.kills).toContainEqual({ shooter: 'a', target: 'a' });
+
+      const over = runUntil('over');
+      expect(over.standings.find((x) => x.id === 'a')).toMatchObject({ kills: 0, killedBy: 'a' });
+    });
   });
 });

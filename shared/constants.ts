@@ -102,7 +102,22 @@ export const SIGHT_RADIUS = 115;
  * Death effects, picked in the lobby. The killer's pick plays on everyone they
  * take out, so a kill carries a signature.
  */
-export const FINISHERS = ['shatter', 'supernova', 'glitch', 'ash', 'singularity', 'storm'] as const;
+export const FINISHERS = [
+  'shatter',
+  'supernova',
+  'glitch',
+  'ash',
+  'singularity',
+  'storm',
+  'anvil',
+  'rocket',
+  'confetti',
+  'balloon',
+  'deleted',
+  'ghost',
+] as const;
+/** The cartoon half of the list, grouped apart in the lobby. */
+export const FUNNY_FINISHERS: readonly FinisherId[] = ['anvil', 'rocket', 'confetti', 'balloon', 'deleted', 'ghost'];
 export type FinisherId = (typeof FINISHERS)[number];
 export const DEFAULT_FINISHER: FinisherId = 'shatter';
 export const FINISHER_NAMES: Record<FinisherId, string> = {
@@ -112,15 +127,25 @@ export const FINISHER_NAMES: Record<FinisherId, string> = {
   ash: 'Ash',
   singularity: 'Black hole',
   storm: 'Storm',
+  anvil: 'Anvil',
+  rocket: 'Rocket',
+  confetti: 'Confetti',
+  balloon: 'Balloon',
+  deleted: 'Deleted',
+  ghost: 'Ghost',
 };
+
+/** Longest a finisher may run at full speed, so a round's reveal never stalls. */
+export const FINISHER_MAX_MS = 1300;
 
 export const isFinisher = (value: unknown): value is FinisherId =>
   (FINISHERS as readonly unknown[]).includes(value);
 
 /**
  * The match-ending round is revealed as a killcam instead of the usual
- * lights-on beat, so the server holds the final lights this long.
+ * lights-on beat, so the server holds the final lights this long. Long enough
+ * for the cut-in and for the slowed finisher to play out in full.
  */
-export const KILLCAM_MS = 4200;
+export const KILLCAM_MS = 8800;
 /** Samples per second of each fighter's path, kept for the killcam replay. */
 export const REPLAY_HZ = 15;
