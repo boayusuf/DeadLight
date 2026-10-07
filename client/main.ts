@@ -408,6 +408,9 @@ function handle(msg: ServerMessage): void {
       }
 
       if (msg.resolution) reveal(msg, msg.resolution, now);
+      // Anything gone that no beam broke was switched off: the sudden-death power cut.
+      const cut = msg.broken.filter((id) => !before.broken.has(id) && !msg.resolution?.broken.includes(id));
+      if (cut.length > 0) window.setTimeout(() => coverCut(cut), RESOLVE_DELAY_MS + HIT_STOP_MS + 150);
       if (entering) {
         const at = Math.max(RESOLVE_DELAY_MS + HIT_STOP_MS + 100, msg.holdMs - INTRO_MS - 150);
         window.setTimeout(() => enterShowdown(msg.players.map((p) => p.id)), msg.round === 0 ? 150 : at);
@@ -588,6 +591,17 @@ function playFinishers(resolution: Resolution, rate: number): void {
     scene.roster.get(killerOf(resolution, victim) ?? victim)?.finisher ?? DEFAULT_FINISHER;
   const kinds = new Set(resolution.eliminated.map(finisherOf));
   for (const kind of kinds) finisherSound(kind, ctx, out, rate);
+}
+
+function coverCut(ids: readonly string[]): void {
+  const now = performance.now();
+  for (const id of ids) {
+    const crate = scene.world.layout.obstacles.find((o) => o.id === id);
+    if (crate?.kind === 'crate') renderer.crateBroken(crate, now);
+  }
+  renderer.announce('NO COVER!', null, now);
+  sfx.alarm();
+  buzz([60, 40, 60]);
 }
 
 /** Down to the last two: the intro, the siren and the heavier music. */

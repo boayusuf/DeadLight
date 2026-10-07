@@ -20,6 +20,7 @@ import {
   PLAYER_RADIUS,
   REPLAY_HZ,
   SNAP_GRACE_MS,
+  STALL_ROUNDS,
 } from '../shared/constants.js';
 import type {
   LobbyPlayer,
@@ -82,6 +83,8 @@ export class Match {
   private readonly world: World & { broken: Set<string> };
   private phaseEndsAt: number;
   private roundsWithoutElimination = 0;
+  /** Rounds the last two have gone without a hit; enough of them and the cover goes. */
+  private showdownStall = 0;
   private nextSampleAt = 0;
 
   constructor(
@@ -289,6 +292,11 @@ export class Match {
       }
     }
 
+    if (survivors.length === 2) {
+      this.showdownStall = eliminated.size > 0 ? 0 : this.showdownStall + 1;
+      if (this.showdownStall >= STALL_ROUNDS) this.cutCover();
+    }
+
     const ending = survivors.length <= 1;
     // The final reveal is played as the killcam instead of the usual beat.
     const holdMs = ending ? KILLCAM_MS : shrank ? LIGHTS_ON_SHRINK_MS : LIGHTS_ON_MS;
@@ -310,6 +318,16 @@ export class Match {
     if (ending) {
       this.phase = 'over';
       this.winner = survivors[0]?.id ?? null;
+    }
+  }
+
+  /**
+   * Sudden death: two fighters hiding behind pillars can stall forever, so the
+   * room cuts power to every bit of cover. Floor machinery keeps running.
+   */
+  private cutCover(): void {
+    for (const o of this.world.layout.obstacles) {
+      if (o.kind !== 'teleporter' && o.kind !== 'conveyor') this.world.broken.add(o.id);
     }
   }
 
