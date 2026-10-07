@@ -39,7 +39,7 @@ import { beatAt, type KillcamBeat } from './killcam.js';
 import { finaleSound, killscreenSound } from './killscreen.js';
 import { obstacleSound } from './obstacles.js';
 import { Music } from './music.js';
-import { Net } from './net.js';
+import { Net, wake } from './net.js';
 import { Prediction } from './prediction.js';
 import { HIT_STOP_MS, INTRO_MS, Renderer, type Scene } from './render.js';
 import { SPRITE_H, SPRITE_W, sprite } from './sprites.js';
@@ -811,6 +811,7 @@ dom.lobbyCode.addEventListener('click', () => {
   if (dom.lobbyCode.textContent) void navigator.clipboard?.writeText(dom.lobbyCode.textContent);
 });
 
+wake();
 showFinisher();
 showMusic();
 show('menu');
