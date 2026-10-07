@@ -57,11 +57,21 @@
         </div>
         <div class="roster" id="lobby-colors"></div>
 
+        <div class="readout">
+          <span>Finisher</span>
+          <b id="finisher-name"></b>
+        </div>
+        <div class="finishers">
+          <canvas id="finisher-preview" aria-hidden="true"></canvas>
+          <div class="finisher-picks" id="lobby-finishers"></div>
+        </div>
+
         <p class="sub" id="touch-hint" hidden>Left thumb moves &middot; right thumb aims</p>
 
         <div class="actions">
           <button id="btn-ready" class="key">Ready</button>
           <button id="btn-start" class="key" hidden>Start match</button>
+          <button id="btn-music" class="key quiet">Music on &middot; M</button>
           <button id="btn-leave" class="key quiet">Leave</button>
         </div>
       </section>
@@ -70,6 +80,7 @@
         <h2 id="result-title">Eliminated</h2>
         <canvas id="result-sprite" width="56" height="80"></canvas>
         <p class="sub" id="result-detail"></p>
+        <p class="stats" id="result-stats"></p>
         <ol id="result-standings"></ol>
         <div class="actions">
           <button id="btn-again" class="key">Rematch</button>

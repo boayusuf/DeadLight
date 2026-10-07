@@ -1,8 +1,11 @@
 import {
+  DEFAULT_FINISHER,
   LOBBY_COUNTDOWN_MS,
   MAX_PLAYERS,
   MIN_PLAYERS,
   PLAYER_COLORS,
+  isFinisher,
+  type FinisherId,
 } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage } from '../shared/protocol.js';
 import { Match } from './match.js';
@@ -35,11 +38,11 @@ export class Room {
     return this.match === null && this.members.length < MAX_PLAYERS;
   }
 
-  join(id: string, name: string, conn: Conn): void {
+  join(id: string, name: string, conn: Conn, finisher: FinisherId = DEFAULT_FINISHER): void {
     const used = new Set(this.members.map((m) => m.color));
     const color = PLAYER_COLORS.find((c) => !used.has(c)) ?? PLAYER_COLORS[0];
 
-    this.members.push({ id, name, color, conn, ready: false });
+    this.members.push({ id, name, color, conn, ready: false, finisher, wins: 0 });
     this.hostId ??= id;
     this.emptySince = null;
 
@@ -80,6 +83,14 @@ export class Room {
     if (!(PLAYER_COLORS as readonly string[]).includes(color)) return;
     if (this.members.some((m) => m.id !== id && m.color === color)) return;
     member.color = color;
+    this.sendLobby();
+  }
+
+  /** Unknown effects are ignored, like unknown colours. */
+  setFinisher(id: string, finisher: unknown): void {
+    const member = this.members.find((m) => m.id === id);
+    if (!member || this.match || !isFinisher(finisher)) return;
+    member.finisher = finisher;
     this.sendLobby();
   }
 
@@ -143,25 +154,29 @@ export class Room {
   }
 
   private startMatch(now: number): void {
-    const lineup = this.members
-      .slice(0, MAX_PLAYERS)
-      .map((m) => ({ id: m.id, name: m.name, color: m.color, ready: m.ready }));
+    const lineup = this.members.slice(0, MAX_PLAYERS).map((m) => this.profile(m));
     if (lineup.length < MIN_PLAYERS) return;
 
     this.countdownEndsAt = null;
     this.match = new Match(lineup, (msg, to) => {
       if (msg.t === 'match') this.roster = msg;
-      this.send(msg, to);
+      this.send(msg.t === 'over' ? { ...msg, wins: this.recordWin(msg.winner) } : msg, to);
     }, now);
   }
 
+  /** Counts the win and returns the room's tally, for the result card. */
+  private recordWin(winner: string | null): Record<string, number> {
+    const champion = this.members.find((m) => m.id === winner);
+    if (champion) champion.wins++;
+    return Object.fromEntries(this.members.map((m) => [m.id, m.wins]));
+  }
+
+  private profile(m: Member): LobbyPlayer {
+    return { id: m.id, name: m.name, color: m.color, ready: m.ready, finisher: m.finisher, wins: m.wins };
+  }
+
   private sendLobby(): void {
-    const players = this.members.map((m) => ({
-      id: m.id,
-      name: m.name,
-      color: m.color,
-      ready: m.ready,
-    }));
+    const players = this.members.map((m) => this.profile(m));
     const countdownMs =
       this.countdownEndsAt === null ? null : Math.max(0, this.countdownEndsAt - Date.now());
 

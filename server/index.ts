@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { BROADCAST_HZ, TICK_HZ, TICK_MS } from '../shared/constants.js';
+import { BROADCAST_HZ, TICK_HZ, TICK_MS, isFinisher } from '../shared/constants.js';
 import type { ClientMessage } from '../shared/protocol.js';
 import { Lobby } from './lobby.js';
 
@@ -88,10 +88,11 @@ wss.on('connection', (socket: WebSocket) => {
       case 'join': {
         if (room) return;
         const name = cleanName(msg.name);
-        if (msg.mode === 'public') lobby.joinPublic(id, name, conn);
-        else if (msg.mode === 'create') lobby.createParty(id, name, conn);
+        const finisher = isFinisher(msg.finisher) ? msg.finisher : undefined;
+        if (msg.mode === 'public') lobby.joinPublic(id, name, conn, finisher);
+        else if (msg.mode === 'create') lobby.createParty(id, name, conn, finisher);
         else {
-          const result = lobby.joinParty(id, name, msg.code, conn);
+          const result = lobby.joinParty(id, name, String(msg.code), conn, finisher);
           if ('error' in result) conn.send(JSON.stringify({ t: 'err', msg: result.error }));
         }
         return;
@@ -107,6 +108,9 @@ wss.on('connection', (socket: WebSocket) => {
         return;
       case 'color':
         room?.setColor(id, String(msg.color));
+        return;
+      case 'finisher':
+        room?.setFinisher(id, msg.finisher);
         return;
       case 'input':
         room?.input(

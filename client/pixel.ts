@@ -15,6 +15,7 @@ export class PixelBuffer {
   private image!: ImageData;
   private data!: Uint8ClampedArray;
   private words!: Uint32Array;
+  private scratch = new Uint32Array(0);
   private readonly surface = document.createElement('canvas');
   private readonly surfaceCtx: CanvasRenderingContext2D;
 
@@ -234,6 +235,32 @@ export class PixelBuffer {
 
   textWidth(value: string, scale = 1, tracking = 1): number {
     return value.length * (GLYPH_W + tracking) * scale - tracking * scale;
+  }
+
+  /**
+   * Re-frames what has been drawn so far: magnifies around buffer point
+   * (cx, cy) and nudges by (ox, oy) whole pixels. Runs between the world and
+   * the HUD, so shake and the killcam zoom never touch the interface.
+   */
+  camera(cx: number, cy: number, zoom: number, ox: number, oy: number, fill: number): void {
+    if (zoom === 1 && ox === 0 && oy === 0 && cx === this.width / 2 && cy === this.height / 2) return;
+    if (this.scratch.length !== this.words.length) this.scratch = new Uint32Array(this.words.length);
+    this.scratch.set(this.words);
+    const empty = 0xff000000 | ((fill & 0xff) << 16) | (fill & 0xff00) | ((fill >> 16) & 0xff);
+    const w = this.width;
+    const h = this.height;
+    for (let y = 0; y < h; y++) {
+      const sy = Math.floor(cy + (y - h / 2) / zoom) - oy;
+      const row = y * w;
+      if (sy < 0 || sy >= h) {
+        this.words.fill(empty, row, row + w);
+        continue;
+      }
+      for (let x = 0; x < w; x++) {
+        const sx = Math.floor(cx + (x - w / 2) / zoom) - ox;
+        this.words[row + x] = sx < 0 || sx >= w ? empty : this.scratch[sy * w + sx]!;
+      }
+    }
   }
 
   /** Blits the finished frame onto the visible canvas, pixels intact. */

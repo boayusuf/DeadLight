@@ -1,4 +1,4 @@
-import { ROOM_GRACE_MS } from '../shared/constants.js';
+import { ROOM_GRACE_MS, type FinisherId } from '../shared/constants.js';
 import { Room, type Conn } from './room.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -13,24 +13,30 @@ export class Lobby {
     return this.byClient.get(id);
   }
 
-  joinPublic(id: string, name: string, conn: Conn): Room {
+  joinPublic(id: string, name: string, conn: Conn, finisher?: FinisherId): Room {
     const room = this.publicRooms.find((r) => r.open) ?? this.createPublic();
-    this.place(room, id, name, conn);
+    this.place(room, id, name, conn, finisher);
     return room;
   }
 
-  createParty(id: string, name: string, conn: Conn): Room {
+  createParty(id: string, name: string, conn: Conn, finisher?: FinisherId): Room {
     const room = new Room(this.freshCode());
     this.rooms.set(room.code!, room);
-    this.place(room, id, name, conn);
+    this.place(room, id, name, conn, finisher);
     return room;
   }
 
-  joinParty(id: string, name: string, code: string, conn: Conn): Room | { error: string } {
+  joinParty(
+    id: string,
+    name: string,
+    code: string,
+    conn: Conn,
+    finisher?: FinisherId,
+  ): Room | { error: string } {
     const room = this.rooms.get(code.trim().toUpperCase());
     if (!room) return { error: 'No party with that code.' };
     if (!room.open) return { error: 'That party is full.' };
-    this.place(room, id, name, conn);
+    this.place(room, id, name, conn, finisher);
     return room;
   }
 
@@ -56,9 +62,9 @@ export class Lobby {
     return [...this.publicRooms, ...this.rooms.values()];
   }
 
-  private place(room: Room, id: string, name: string, conn: Conn): void {
+  private place(room: Room, id: string, name: string, conn: Conn, finisher?: FinisherId): void {
     this.byClient.set(id, room);
-    room.join(id, name, conn);
+    room.join(id, name, conn, finisher);
   }
 
   private createPublic(): Room {
