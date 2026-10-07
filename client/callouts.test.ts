@@ -7,6 +7,7 @@ const round = (kills: [string, string][], duels = 0): Resolution => ({
   kills: kills.map(([shooter, target]) => ({ shooter, target })),
   duels: Array.from({ length: duels }, () => ({ a: 'x', b: 'y' })),
   eliminated: [...new Set(kills.map(([, t]) => t))],
+  broken: [],
 });
 
 describe('calloutFor', () => {
@@ -25,6 +26,14 @@ describe('calloutFor', () => {
 
   it('lets a streak outrank first blood', () => {
     expect(calloutFor(round([['a', 'b'], ['a', 'c']]), true)?.title).toBe('DOUBLE KILL');
+  });
+
+  it('laughs at a beam that came back off a mirror into its shooter', () => {
+    expect(calloutFor(round([['a', 'a'], ['b', 'c'], ['b', 'd']]), true)).toEqual({ title: 'OOPS!', by: 'a' });
+  });
+
+  it('does not turn a self-hit plus one kill into a double', () => {
+    expect(calloutFor(round([['a', 'a'], ['a', 'b']]), false)?.title).toBe('OOPS!');
   });
 
   it('marks a clash when nobody died', () => {

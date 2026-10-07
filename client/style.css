@@ -97,8 +97,10 @@ body {
   position: fixed;
   inset: 0;
   display: grid;
-  place-items: center;
+  /* "safe" keeps the top of a tall lobby reachable instead of centring it off-screen. */
+  place-items: safe center;
   padding: 24px;
+  overflow-y: auto;
 }
 
 #overlay.hidden {
@@ -451,6 +453,68 @@ li .wins {
   border-color: var(--amber);
 }
 
+/* --- Arena and bots ------------------------------------------------ */
+
+.map-picks {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+
+.map-picks .key,
+.bots .key {
+  padding: 5px 2px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.map-picks .key.mine {
+  color: var(--void);
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+/* Everyone sees the pick; only the host can change it. */
+.map-picks .key:disabled.mine {
+  opacity: 1;
+}
+
+#map-blurb {
+  margin-top: -8px;
+  text-transform: none;
+  letter-spacing: 0.08em;
+}
+
+.bots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.bots[hidden] {
+  display: none;
+}
+
+li .kick {
+  font: inherit;
+  color: var(--metal-light);
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+li .kick:hover {
+  color: var(--red);
+}
+
+.finisher-picks .group {
+  grid-column: 1 / -1;
+  font-size: 8px;
+  letter-spacing: 0.3em;
+  color: var(--ink);
+}
+
 /* --- Result ---------------------------------------------------------- */
 
 #panel-result {
@@ -491,4 +555,16 @@ li .wins {
 
 .stats:empty {
   display: none;
+}
+
+/* The card arrives after the killcam's finale, so it eases in instead of cutting. */
+#panel-result:not([hidden]) {
+  animation: card-in 420ms steps(7, end);
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
 }

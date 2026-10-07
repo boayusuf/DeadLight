@@ -1,4 +1,14 @@
-import { arenaSize, clampToArena, spawnPoints } from '../shared/arena.js';
+import { arenaSize } from '../shared/arena.js';
+import {
+  collide,
+  layoutFor,
+  maxDrift,
+  padUnder,
+  spawnsFor,
+  teleportStep,
+  type MapId,
+  type World,
+} from '../shared/maps.js';
 import { stepPlayer } from '../shared/movement.js';
 import {
   BLACKOUT_MAX_MS,
@@ -35,6 +45,8 @@ interface MatchPlayer extends LobbyPlayer {
   seq: number;
   /** Last position the client reported and the server accepted, and when. */
   anchor: { x: number; y: number; at: number };
+  /** Teleporter pad this player stands on and has used; it fires again only after they step off. */
+  onPad: string | null;
   kills: number;
   longest: number;
   killedBy: string | null;
@@ -67,6 +79,7 @@ export class Match {
 
   private readonly players: MatchPlayer[];
   private readonly startCount: number;
+  private readonly world: World & { broken: Set<string> };
   private phaseEndsAt: number;
   private roundsWithoutElimination = 0;
   private nextSampleAt = 0;
@@ -75,11 +88,13 @@ export class Match {
     roster: readonly LobbyPlayer[],
     private readonly send: Broadcast,
     now: number,
+    readonly map: MapId = 'reactor',
   ) {
     this.startCount = roster.length;
     this.size = arenaSize(this.startCount, 0);
+    this.world = { size: this.size, layout: layoutFor(map, this.size), broken: new Set() };
 
-    const spawns = spawnPoints(roster.length, this.size, Math.random() * Math.PI * 2);
+    const spawns = spawnsFor(roster.length, this.world, Math.random() * Math.PI * 2);
     this.players = roster.map((p, i) => ({
       ...p,
       x: spawns[i]!.x,
@@ -92,6 +107,7 @@ export class Match {
       out: null,
       seq: 0,
       anchor: { x: spawns[i]!.x, y: spawns[i]!.y, at: now },
+      onPad: null,
       kills: 0,
       longest: 0,
       killedBy: null,
@@ -99,7 +115,7 @@ export class Match {
     }));
 
     this.phaseEndsAt = now + LIGHTS_ON_MS;
-    this.send({ t: 'match', players: roster.map((p) => ({ ...p })), startCount: this.startCount });
+    this.send({ t: 'match', players: roster.map((p) => ({ ...p })), startCount: this.startCount, map });
     this.send({
       t: 'lights',
       round: 0,
@@ -110,6 +126,7 @@ export class Match {
       resolution: null,
       remaining: this.startCount,
       holdMs: LIGHTS_ON_MS,
+      broken: [],
     });
   }
 
@@ -137,9 +154,9 @@ export class Match {
     if (Number.isFinite(aim)) p.aim = aim;
 
     if (!report || !Number.isFinite(report.x) || !Number.isFinite(report.y)) return;
-    const inside = clampToArena(report, this.size, PLAYER_RADIUS);
-    const reach =
-      ((MOVE_SPEED * Math.max(0, now - p.anchor.at)) / 1000) * REPORT_TOLERANCE + REPORT_SLACK;
+    const inside = collide(report, PLAYER_RADIUS, this.world);
+    const speed = MOVE_SPEED + maxDrift(this.world.layout);
+    const reach = ((speed * Math.max(0, now - p.anchor.at)) / 1000) * REPORT_TOLERANCE + REPORT_SLACK;
     if (Math.hypot(inside.x - p.anchor.x, inside.y - p.anchor.y) > reach) return;
 
     p.x = inside.x;
@@ -158,7 +175,7 @@ export class Match {
 
   tick(now: number, dt: number): void {
     if (this.phase === 'dark') {
-      this.move(dt);
+      this.move(now, dt);
       this.sample(now);
     }
     if (this.phase === 'over' || now < this.phaseEndsAt) return;
@@ -195,12 +212,17 @@ export class Match {
     this.send({ t: 'over', winner: this.winner, rounds: this.round, standings: this.standings(), wins: {} });
   }
 
-  private move(dt: number): void {
+  private move(now: number, dt: number): void {
     for (const p of this.players) {
-      if (!p.alive || !p.connected || (p.mx === 0 && p.my === 0)) continue;
-      const moved = stepPlayer(p, p.mx, p.my, dt, this.size);
-      p.x = moved.x;
-      p.y = moved.y;
+      // Belts drag everyone still standing, input or not, connected or not.
+      if (!p.alive) continue;
+      const moved = stepPlayer(p, p.mx, p.my, dt, this.world);
+      const tele = teleportStep(moved, this.world, p.onPad);
+      p.x = tele.x;
+      p.y = tele.y;
+      p.onPad = tele.onPad;
+      // Reports from the new spot must be judged from there, not from the pad left behind.
+      if (tele.jumped) p.anchor = { x: tele.x, y: tele.y, at: now };
     }
   }
 
@@ -220,6 +242,7 @@ export class Match {
       p.mx = 0;
       p.my = 0;
       p.anchor = { x: p.x, y: p.y, at: now };
+      p.onPad = padUnder(p, this.world);
       p.trail = p.alive ? [trailPoint(p)] : [];
     }
     this.nextSampleAt = now + SAMPLE_MS;
@@ -232,7 +255,8 @@ export class Match {
     this.phase = 'lights';
 
     const contenders = this.players.filter((p) => p.alive);
-    const resolution = resolveRound(contenders, this.size);
+    const resolution = resolveRound(contenders, this.world);
+    for (const id of resolution.broken) this.world.broken.add(id);
     this.tally(resolution, contenders);
     const eliminated = new Set(resolution.eliminated);
     for (const p of contenders) {
@@ -254,10 +278,11 @@ export class Match {
       if (stage !== this.stage) {
         this.stage = stage;
         this.size = arenaSize(this.startCount, stage);
+        this.world.size = this.size;
         this.roundsWithoutElimination = 0;
         shrank = true;
         for (const p of survivors) {
-          const moved = clampToArena(p, this.size, PLAYER_RADIUS);
+          const moved = collide(p, PLAYER_RADIUS, this.world);
           p.x = moved.x;
           p.y = moved.y;
         }
@@ -277,6 +302,7 @@ export class Match {
       resolution,
       remaining: survivors.length,
       holdMs,
+      broken: [...this.world.broken],
       ...(ending ? { replay: this.replay(contenders) } : {}),
     });
 
@@ -293,9 +319,11 @@ export class Match {
       const shooter = contenders.find((p) => p.id === kill.shooter);
       const target = contenders.find((p) => p.id === kill.target);
       if (!shooter || !target) continue;
+      target.killedBy ??= shooter.id;
+      // A beam that bounced back onto its own shooter is a death, not a kill.
+      if (shooter === target) continue;
       shooter.kills++;
       shooter.longest = Math.max(shooter.longest, Math.hypot(target.x - shooter.x, target.y - shooter.y));
-      target.killedBy ??= shooter.id;
     }
   }
 

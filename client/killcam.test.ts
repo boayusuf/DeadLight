@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { KILLCAM_MS } from '../shared/constants.js';
-import { KILLCAM_BEATS, beatAt, frameAround, poseAt } from './killcam.js';
+import { FINISHER_MAX_MS, KILLCAM_MS } from '../shared/constants.js';
+import { KILLCAM_BEATS, KILLCAM_SLOWMO, beatAt, frameAround, poseAt } from './killcam.js';
+import { FINALE_MS, KILLSCREEN_MS } from './killscreen.js';
 
 describe('killcam timeline', () => {
   it('fits exactly inside the time the server holds the final lights', () => {
@@ -13,11 +14,18 @@ describe('killcam timeline', () => {
     expect(beatAt(1150).p).toBeCloseTo(0.5, 6);
     expect(beatAt(2000).beat).toBe('shot');
     expect(beatAt(2900).beat).toBe('freeze');
-    expect(beatAt(3200).beat).toBe('boom');
+    expect(beatAt(3200).beat).toBe('cutin');
+    expect(beatAt(3200 + KILLSCREEN_MS).beat).toBe('boom');
+    expect(beatAt(KILLCAM_MS - FINALE_MS).beat).toBe('finale');
+  });
+
+  it('gives the slowed finisher its whole run', () => {
+    const boom = KILLCAM_BEATS.find(([beat]) => beat === 'boom')![1];
+    expect(boom * KILLCAM_SLOWMO).toBeGreaterThanOrEqual(FINISHER_MAX_MS);
   });
 
   it('rests on the end of the last beat once time runs out', () => {
-    expect(beatAt(KILLCAM_MS + 5000)).toMatchObject({ beat: 'boom', p: 1 });
+    expect(beatAt(KILLCAM_MS + 5000)).toMatchObject({ beat: 'finale', p: 1 });
   });
 });
 
