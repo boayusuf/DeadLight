@@ -62,13 +62,24 @@ function raySegmentHitsCircle(
  * pairwise — if two players hit each other, that pair neutralises and both
  * survive, but either beam still kills anyone else it crossed. A beam that
  * comes back off a mirror can hit its own shooter.
+ *
+ * `unarmed` fighters stand in the snapshot and can be hit, but fire nothing:
+ * the Ghost in Ghost mode.
  */
-export function resolveRound(shooters: readonly Shooter[], world: World): Resolution {
+export function resolveRound(
+  shooters: readonly Shooter[],
+  world: World,
+  unarmed: ReadonlySet<string> = new Set(),
+): Resolution {
   const beams: Beam[] = [];
   const hit = new Map<string, Set<string>>();
   const broken = new Set<string>();
 
   for (const s of shooters) {
+    if (unarmed.has(s.id)) {
+      hit.set(s.id, new Set());
+      continue;
+    }
     const dir = { x: Math.cos(s.aim), y: Math.sin(s.aim) };
     const path = traceBeam(beamOrigin(s), dir, world);
     beams.push({ id: s.id, segments: path.segments });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_PLAYERS, PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
 import type { ServerMessage } from '../shared/protocol.js';
-import { BOT_FILL_AFTER_MS, BOT_FILL_TO, Room } from './room.js';
+import { Room, votesNeeded } from './room.js';
 
 function colours(room: Room): Record<string, string> {
   return Object.fromEntries(room.members.map((m) => [m.id, m.color]));
@@ -88,15 +88,23 @@ describe('Room wins', () => {
       throw new Error(`No '${t}' arrived`);
     };
 
+    // No mirrors, so a beam aimed away can never come back; and if cover blocks
+    // the shot, sudden death cuts it. Spawns are random, so b looks away every round.
+    room.setMap('a', 'pillars');
     room.requestStart('a', clock);
-    until('dark');
-    const lights = until('lights');
-    if (lights.t !== 'lights') throw new Error('expected lights');
-    const a = lights.players.find((p) => p.id === 'a')!;
-    const b = lights.players.find((p) => p.id === 'b')!;
-    until('dark');
-    room.input('a', 1, 0, 0, Math.atan2(b.y - a.y, b.x - a.x));
-    room.input('b', 1, 0, 0, Math.atan2(a.y - b.y, a.x - b.x) + Math.PI / 2);
+    const intro = [...seen].reverse().find((m) => m.t === 'lights');
+    if (intro?.t !== 'lights') throw new Error('expected lights');
+    const a = intro.players.find((p) => p.id === 'a')!;
+    const b = intro.players.find((p) => p.id === 'b')!;
+    const toB = Math.atan2(b.y - a.y, b.x - a.x);
+    for (let seq = 1; ; seq++) {
+      if (seq > 40) throw new Error('a never landed the shot');
+      until('dark');
+      room.input('a', seq, 0, 0, toB);
+      room.input('b', seq, 0, 0, toB);
+      const lights = until('lights');
+      if (lights.t === 'lights' && lights.remaining < 2) break;
+    }
 
     const over = until('over');
     expect(over.t === 'over' && over.wins).toEqual({ a: 1, b: 0 });
@@ -177,14 +185,147 @@ describe('Room bots', () => {
     expect(room.emptySince).toBe(5000);
   });
 
-  it('fills a lonely matchmaking room with bots after a wait', () => {
+  it('never seats bots in matchmaking, by itself or on request', () => {
     const room = new Room(null);
     room.join('a', 'A', quiet);
-    let clock = 1000;
-    for (; clock < 1000 + BOT_FILL_AFTER_MS - 100; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
-    expect(room.members).toHaveLength(1);
-    for (; clock < 1000 + BOT_FILL_AFTER_MS + 10_000; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
-    expect(room.members).toHaveLength(BOT_FILL_TO);
-    expect(room.members.filter((m) => m.bot)).toHaveLength(BOT_FILL_TO - 1);
+    room.addBot('a', 'normal');
+    for (let clock = 1000; clock < 60_000; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
+    expect(room.members.map((m) => m.id)).toEqual(['a']);
+  });
+});
+
+describe('Room kicks', () => {
+  /** A room whose members record what they were sent. */
+  function room(code: string | null, ids: string[]) {
+    const inbox = new Map<string, ServerMessage[]>();
+    const r = new Room(code);
+    for (const id of ids) {
+      inbox.set(id, []);
+      r.join(id, id.toUpperCase(), { send: (raw) => inbox.get(id)!.push(JSON.parse(raw)) });
+    }
+    const lastLobby = (id: string) => [...inbox.get(id)!].reverse().find((m) => m.t === 'lobby');
+    return { r, inbox, lastLobby };
+  }
+
+  it('lets the party host remove a person, and nobody else', () => {
+    const { r, inbox } = room('ABCD', ['a', 'b', 'c']);
+    expect(r.kick('b', 'c', 0)).toBeNull();
+    expect(r.kick('a', 'a', 0)).toBeNull();
+    expect(r.kick('a', 'c', 0)).toBe('c');
+    expect(r.members.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(inbox.get('c')!.at(-1)).toEqual({ t: 'kicked', vote: false });
+  });
+
+  it('keeps bots in the party host’s hands only', () => {
+    const { r } = room('ABCD', ['a', 'b']);
+    r.addBot('b', 'normal');
+    expect(r.members.filter((m) => m.bot)).toHaveLength(0);
+    r.addBot('a', 'normal');
+    const bot = r.members.find((m) => m.bot)!;
+    r.removeBot('b', bot.id);
+    expect(r.members).toContain(bot);
+    r.removeBot('a', bot.id);
+    expect(r.members).not.toContain(bot);
+  });
+
+  it('has no host kick in matchmaking', () => {
+    const { r } = room(null, ['a', 'b', 'c']);
+    expect(r.kick('a', 'b', 0)).toBeNull();
+    expect(r.members).toHaveLength(3);
+  });
+
+  it('needs most of the others, and at least two, to vote someone out', () => {
+    expect([2, 3, 4, 5, 6, 10].map(votesNeeded)).toEqual([2, 2, 2, 3, 3, 5]);
+    const { r, inbox, lastLobby } = room(null, ['a', 'b', 'c', 'd', 'e']);
+    expect(r.voteKick('a', 'e', 0)).toBeNull();
+    expect(r.voteKick('b', 'e', 0)).toBeNull();
+    const seen = lastLobby('c');
+    expect(seen?.t === 'lobby' && [seen.votes, seen.voted, seen.votesNeeded]).toEqual([{ e: 2 }, [], 3]);
+    const mine = lastLobby('a');
+    expect(mine?.t === 'lobby' && mine.voted).toEqual(['e']);
+
+    expect(r.voteKick('c', 'e', 0)).toBe('e');
+    expect(r.members.map((m) => m.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(inbox.get('e')!.at(-1)).toEqual({ t: 'kicked', vote: true });
+  });
+
+  it('takes a repeated vote back, and ignores votes on yourself or strangers', () => {
+    const { r, lastLobby } = room(null, ['a', 'b', 'c']);
+    r.voteKick('a', 'c', 0);
+    r.voteKick('a', 'c', 0);
+    const lobby = lastLobby('b');
+    expect(lobby?.t === 'lobby' && lobby.votes).toEqual({ c: 0 });
+    expect(r.voteKick('a', 'a', 0)).toBeNull();
+    expect(r.voteKick('a', 'zz', 0)).toBeNull();
+    expect(r.voteKick('zz', 'a', 0)).toBeNull();
+    expect(r.members).toHaveLength(3);
+  });
+
+  it('forgets votes when a voter leaves', () => {
+    const { r } = room(null, ['a', 'b', 'c', 'd']);
+    r.voteKick('a', 'd', 0);
+    r.leave('a', 0);
+    expect(r.voteKick('b', 'd', 0)).toBeNull();
+    expect(r.voteKick('c', 'd', 0)).toBe('d');
+  });
+
+  it('can vote someone out mid-match', () => {
+    const { r } = room(null, ['a', 'b', 'c']);
+    for (const id of ['a', 'b', 'c']) r.setReady(id, true);
+    for (let clock = 1000; !r.match && clock < 20_000; clock += TICK_MS) r.tick(clock, TICK_MS / 1000);
+    expect(r.match).not.toBeNull();
+    r.voteKick('a', 'c', 25_000);
+    expect(r.voteKick('b', 'c', 25_000)).toBe('c');
+    expect(r.members.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(r.match).not.toBeNull();
+  });
+});
+
+describe('Room modes', () => {
+  /** Collects what a member is sent, decoded. */
+  function inbox() {
+    const seen: ServerMessage[] = [];
+    return { seen, conn: { send: (raw: string) => seen.push(JSON.parse(raw) as ServerMessage) } };
+  }
+  const lastLobby = (seen: ServerMessage[]) => [...seen].reverse().find((m) => m.t === 'lobby') as Extract<ServerMessage, { t: 'lobby' }>;
+
+  it('lets the host pick a mode, tells everyone, and ignores anyone else', () => {
+    const host = inbox();
+    const guest = inbox();
+    const room = new Room('ABCD');
+    room.join('a', 'A', host.conn);
+    room.join('b', 'B', guest.conn);
+
+    room.setMode('b', 'ghost');
+    expect(room.gameMode).toBe('classic');
+    room.setMode('a', 'ghost');
+    expect(lastLobby(host.seen).gameMode).toBe('ghost');
+    expect(lastLobby(guest.seen).gameMode).toBe('ghost');
+    room.setMode('a', 'switch');
+    expect(room.gameMode).toBe('ghost');
+  });
+
+  it('starts the chosen mode, and refuses Assassin with too few fighters', () => {
+    const host = inbox();
+    const room = new Room('ABCD');
+    room.join('a', 'A', host.conn);
+    room.join('b', 'B', { send: () => {} });
+
+    room.setMode('a', 'assassin');
+    room.requestStart('a', 1000);
+    expect(room.match).toBeNull();
+
+    room.setMode('a', 'hunted');
+    room.requestStart('a', 1000);
+    const match = host.seen.find((m) => m.t === 'match') as Extract<ServerMessage, { t: 'match' }>;
+    expect(match.gameMode).toBe('hunted');
+    expect(host.seen.some((m) => m.t === 'brief')).toBe(true);
+  });
+
+  it('keeps the matchmaking mode out of any one player’s hands', () => {
+    const room = new Room(null);
+    expect(room.gameMode).toBe('classic');
+    room.setMode('a', 'ghost');
+    expect(room.gameMode).toBe('classic');
   });
 });

@@ -1,5 +1,6 @@
 import type { FinisherId } from './constants.js';
 import type { MapChoice, MapId } from './maps.js';
+import type { ModeId, Role, RoundModeId, TargetPath } from './modes.js';
 import type { Resolution } from './resolve.js';
 
 export interface LobbyPlayer {
@@ -24,6 +25,29 @@ export interface Standing {
   /** Distance of this player's farthest kill, in world units; 0 without a kill. */
   longest: number;
   killedBy: string | null;
+  /** Points in a round mode; absent in Classic. */
+  score?: number;
+}
+
+/** How a round ended, for the banner everyone sees. */
+export type RoundOutcome =
+  /** The target or ghost went down; `winners` landed the shot. */
+  | { kind: 'caught'; focus: string; winners: string[] }
+  /** The target or ghost made it to the end. */
+  | { kind: 'escaped'; focus: string }
+  /** Assassin: who completed a contract this round. */
+  | { kind: 'contracts'; winners: string[] };
+
+/** What one fighter alone is told about their part in the round. */
+export interface Brief {
+  role: Role;
+  /** Hunted, to the Target only: the path they are held to. */
+  path?: TargetPath;
+  /** Assassin, to its owner only: who they are hunting and how far along they are. */
+  contract?: string;
+  progress?: number;
+  /** Assassin: whether the contract is still live, done, or lost. */
+  status?: 'live' | 'complete' | 'failed';
 }
 
 /** One fighter's path through a blackout: x, y and aim at REPLAY_HZ. */
@@ -52,9 +76,13 @@ export type ClientMessage =
   | { t: 'finisher'; finisher: string }
   /** Host only: the arena for the next match. */
   | { t: 'map'; map: string }
+  /** Host only: the game mode for the next match. */
+  | { t: 'mode'; mode: string }
   /** Host only: seat a bot, or remove one by id. */
   | { t: 'bot'; add: true; difficulty: string }
   | { t: 'bot'; add: false; id: string }
+  /** Party host: remove someone. Matchmaking: vote to remove them, or take the vote back. */
+  | { t: 'kick'; id: string }
   /** `seq` numbers each input so the server can say which ones it has applied. */
   | { t: 'input'; seq: number; mx: number; my: number; aim: number; x?: number; y?: number }
   | { t: 'again' };
@@ -69,8 +97,32 @@ export type ServerMessage
       players: LobbyPlayer[];
       countdownMs: number | null;
       map: MapChoice;
+      gameMode: ModeId;
+      /** Matchmaking kick votes against each player, and the ones this player cast. */
+      votes: Record<string, number>;
+      voted: string[];
+      /** Votes that remove someone; null in a party, where the host decides. */
+      votesNeeded: number | null;
     }
-  | { t: 'match'; players: LobbyPlayer[]; startCount: number; map: MapId }
+  /** You were removed from the room, by the host or by a vote. */
+  | { t: 'kicked'; vote: boolean }
+  | { t: 'match'; players: LobbyPlayer[]; startCount: number; map: MapId; gameMode: ModeId }
+  /**
+   * Round modes: everything public about the round. Sent as it starts, with
+   * `outcome` null, and again as it ends.
+   */
+  | {
+      t: 'round';
+      mode: RoundModeId;
+      round: number;
+      rounds: number;
+      /** The Target or Ghost; null in Assassin, where every target is private. */
+      focus: string | null;
+      scores: Record<string, number>;
+      outcome: RoundOutcome | null;
+    }
+  /** Round modes: this fighter's private orders. Never sent to anyone else. */
+  | { t: 'brief'; brief: Brief }
   /**
    * Lights on: the round that just ended, resolved. Also the only moment
    * opponent positions are ever sent to a client.
@@ -100,5 +152,12 @@ export type ServerMessage
   /** Eliminated players and late joiners watch the blackout in full light. */
   | { t: 'watch'; players: SnapshotPlayer[] }
   /** `wins` is the room's running tally including this match, keyed by player id. */
-  | { t: 'over'; winner: string | null; rounds: number; standings: Standing[]; wins: Record<string, number> }
+  | {
+      t: 'over';
+      winner: string | null;
+      rounds: number;
+      standings: Standing[];
+      wins: Record<string, number>;
+      gameMode: ModeId;
+    }
   | { t: 'err'; msg: string };

@@ -23,6 +23,29 @@ party, send the four-letter code to your friends, ready up.
   dies for three rounds. The coloured floor bands show where it will close next.
 - Last one standing wins.
 
+In a party, the host adds and removes bots and can kick players. Public
+matchmaking is people only; a player is removed if most of the others vote to
+kick them.
+
+## Modes
+
+The host picks one in the lobby; public matchmaking plays them in turn.
+
+- **Classic** — the rules above. Last one standing wins.
+- **Hunted** — each round one player is the Target, held to a secret path (a line,
+  L, T, Z, zigzag or square). Everyone else hunts them. Catch the Target: +1 to
+  whoever hit it. Survive three blackouts: +1 to the Target, who can shoot back.
+- **Ghost** — each round one player is the Ghost: unarmed, free to roam, and
+  invisible to the hunters after the round's first reveal. Find it: +1. Stay
+  hidden: +1 to the Ghost.
+- **Assassin** — everyone gets a secret target. Kill yours, or any three
+  others, to complete your contract (+1) and leave the arena. Die first and the
+  contract fails. Three players minimum.
+
+Every player takes the same number of turns as Target or Ghost, and the
+highest score wins. The server deals all roles and contracts and decides every
+point; each player is only sent their own.
+
 ![A blackout: only your own fighter and laser are visible](docs/blackout.jpg)
 
 ## Running locally
@@ -40,6 +63,9 @@ npm start
 ```
 
 `render.yaml` deploys it to Render as a single web service.
+
+The client can also go on Firebase Hosting, talking to that server:
+`npm run deploy:firebase` (the server URL is in `.env.firebase`).
 
 ## How it works
 

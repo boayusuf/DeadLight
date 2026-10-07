@@ -47,6 +47,13 @@ export class Lobby {
     room.leave(id, now);
   }
 
+  /** Host kicks in a party, vote kicks in matchmaking; the room decides. */
+  kick(requester: string, target: unknown, now: number): void {
+    const room = this.byClient.get(requester);
+    const out = room?.isPublic ? room.voteKick(requester, target, now) : room?.kick(requester, target, now);
+    if (out) this.byClient.delete(out);
+  }
+
   tick(now: number, dt: number): void {
     for (const room of this.allRooms()) {
       room.tick(now, dt);

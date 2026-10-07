@@ -150,4 +150,12 @@ describe('resolveRound with obstacles', () => {
     const r = resolveRound([at('a', 0, 0, 0), at('b', 400, 0, Math.PI / 2)], withObstacles([glass]));
     expect(r.eliminated).toEqual(['b']);
   });
+
+  it('lets an unarmed fighter be hit without firing a beam of its own', () => {
+    const shooters = [at('ghost', -200, 0, 0), at('hunter', 200, 0, Math.PI)];
+    const r = resolveRound(shooters, WORLD, new Set(["ghost"]));
+    expect(r.beams.map((b) => b.id)).toEqual(['hunter']);
+    expect(r.duels).toEqual([]);
+    expect(r.eliminated).toEqual(['ghost']);
+  });
 });

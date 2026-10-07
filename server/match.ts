@@ -9,6 +9,7 @@ import {
   type MapId,
   type World,
 } from '../shared/maps.js';
+import { onPath, type Leg } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import {
   BLACKOUT_MAX_MS,
@@ -32,7 +33,7 @@ import type {
 import { resolveRound, type Resolution } from '../shared/resolve.js';
 import { nextStage } from '../shared/stages.js';
 
-interface MatchPlayer extends LobbyPlayer {
+export interface MatchPlayer extends LobbyPlayer {
   x: number;
   y: number;
   aim: number;
@@ -61,14 +62,18 @@ const SAMPLE_MS = 1000 / REPLAY_HZ;
 const REPORT_TOLERANCE = 1.3;
 const REPORT_SLACK = 24;
 
-type Phase = 'lights' | 'dark' | 'over';
+export type Phase = 'lights' | 'dark' | 'over';
 
 export type Broadcast = (message: ServerMessage, to?: string) => void;
 
 /**
- * One match, driven by `tick`. The phases alternate lights-on and blackout;
- * every round is resolved from the single snapshot taken the instant the
- * lights come back.
+ * One Classic match, driven by `tick`. The phases alternate lights-on and
+ * blackout; every round is resolved from the single snapshot taken the instant
+ * the lights come back.
+ *
+ * The round modes extend this class: movement, input checking, the blackout
+ * cycle and the privacy of `pushState` are shared, and only what a mode does
+ * differently is overridden.
  */
 export class Match {
   phase: Phase = 'lights';
@@ -78,10 +83,10 @@ export class Match {
   winner: string | null = null;
   finished = false;
 
-  private readonly players: MatchPlayer[];
-  private readonly startCount: number;
-  private readonly world: World & { broken: Set<string> };
-  private phaseEndsAt: number;
+  protected readonly players: MatchPlayer[];
+  protected readonly startCount: number;
+  protected readonly world: World & { broken: Set<string> };
+  protected phaseEndsAt: number;
   private roundsWithoutElimination = 0;
   /** Rounds the last two have gone without a hit; enough of them and the cover goes. */
   private showdownStall = 0;
@@ -89,9 +94,11 @@ export class Match {
 
   constructor(
     roster: readonly LobbyPlayer[],
-    private readonly send: Broadcast,
+    protected readonly send: Broadcast,
     now: number,
     readonly map: MapId = 'reactor',
+    /** Round modes set up their own first round once their state exists. */
+    announce = true,
   ) {
     this.startCount = roster.length;
     this.size = arenaSize(this.startCount, 0);
@@ -118,7 +125,14 @@ export class Match {
     }));
 
     this.phaseEndsAt = now + LIGHTS_ON_MS;
-    this.send({ t: 'match', players: roster.map((p) => ({ ...p })), startCount: this.startCount, map });
+    if (!announce) return;
+    this.send({
+      t: 'match',
+      players: roster.map((p) => ({ ...p })),
+      startCount: this.startCount,
+      map,
+      gameMode: 'classic',
+    });
     this.send({
       t: 'lights',
       round: 0,
@@ -157,7 +171,9 @@ export class Match {
     if (Number.isFinite(aim)) p.aim = aim;
 
     if (!report || !Number.isFinite(report.x) || !Number.isFinite(report.y)) return;
-    const inside = collide(report, PLAYER_RADIUS, this.world);
+    const free = collide(report, PLAYER_RADIUS, this.world);
+    const path = this.pathOf(p);
+    const inside = path ? onPath(free, path) : free;
     const speed = MOVE_SPEED + maxDrift(this.world.layout);
     const reach = ((speed * Math.max(0, now - p.anchor.at)) / 1000) * REPORT_TOLERANCE + REPORT_SLACK;
     if (Math.hypot(inside.x - p.anchor.x, inside.y - p.anchor.y) > reach) return;
@@ -212,7 +228,19 @@ export class Match {
     if (this.phase !== 'over' || this.finished || now < this.phaseEndsAt) return;
     this.finished = true;
     // The room outlives the match and owns the running tally, so it fills `wins` in.
-    this.send({ t: 'over', winner: this.winner, rounds: this.round, standings: this.standings(), wins: {} });
+    this.send({
+      t: 'over',
+      winner: this.winner,
+      rounds: this.round,
+      standings: this.standings(),
+      wins: {},
+      gameMode: 'classic',
+    });
+  }
+
+  /** The path a fighter is held to, if any: Hunted's Target. */
+  protected pathOf(_p: MatchPlayer): readonly Leg[] | null {
+    return null;
   }
 
   private move(now: number, dt: number): void {
@@ -220,6 +248,14 @@ export class Match {
       // Belts drag everyone still standing, input or not, connected or not.
       if (!p.alive) continue;
       const moved = stepPlayer(p, p.mx, p.my, dt, this.world);
+      const path = this.pathOf(p);
+      if (path) {
+        // A fighter on a path slides along it and never takes a teleporter off it.
+        const held = onPath(moved, path);
+        p.x = held.x;
+        p.y = held.y;
+        continue;
+      }
       const tele = teleportStep(moved, this.world, p.onPad);
       p.x = tele.x;
       p.y = tele.y;
@@ -238,7 +274,7 @@ export class Match {
     }
   }
 
-  private startBlackout(now: number): void {
+  protected startBlackout(now: number): void {
     this.phase = 'dark';
     this.round++;
     for (const p of this.players) {
@@ -254,7 +290,7 @@ export class Match {
     this.send({ t: 'dark', round: this.round, durationMs: duration });
   }
 
-  private endBlackout(now: number): void {
+  protected endBlackout(now: number): void {
     this.phase = 'lights';
 
     const contenders = this.players.filter((p) => p.alive);
@@ -332,7 +368,7 @@ export class Match {
   }
 
   /** Kill counts, the longest shot, and who took each player out first. */
-  private tally(resolution: Resolution, contenders: readonly MatchPlayer[]): void {
+  protected tally(resolution: Resolution, contenders: readonly MatchPlayer[]): void {
     for (const kill of resolution.kills) {
       const shooter = contenders.find((p) => p.id === kill.shooter);
       const target = contenders.find((p) => p.id === kill.target);
@@ -346,7 +382,7 @@ export class Match {
   }
 
   /** The final blackout, closed with the positions the shots were fired from. */
-  private replay(contenders: readonly MatchPlayer[]): ReplayTrack[] {
+  protected replay(contenders: readonly MatchPlayer[]): ReplayTrack[] {
     return contenders.map((p) => ({ id: p.id, points: [...p.trail, trailPoint(p)] }));
   }
 
@@ -364,7 +400,7 @@ export class Match {
   }
 
   /** Only the players who were standing when the lights came on. */
-  private snapshot(source: readonly MatchPlayer[]): SnapshotPlayer[] {
+  protected snapshot(source: readonly MatchPlayer[]): SnapshotPlayer[] {
     return source.map((p) => ({ id: p.id, x: p.x, y: p.y, aim: p.aim, alive: p.alive }));
   }
 }

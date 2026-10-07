@@ -28,8 +28,16 @@ import {
   teleportStep,
   type MapChoice,
 } from '../shared/maps.js';
+import {
+  MODE_BLURBS,
+  MODE_IDS,
+  MODE_MIN_PLAYERS,
+  MODE_NAMES,
+  onPath,
+  type ModeId,
+} from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
-import type { ServerMessage, Standing } from '../shared/protocol.js';
+import type { LobbyPlayer, ServerMessage, Standing } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
 import { Sfx } from './audio.js';
 import { calloutFor, killerOf } from './callouts.js';
@@ -76,6 +84,9 @@ const dom = {
   finisherPicks: el('lobby-finishers'),
   finisherPreview: el<HTMLCanvasElement>('finisher-preview'),
   btnMusic: el<HTMLButtonElement>('btn-music'),
+  modeName: el('mode-name'),
+  modeBlurb: el('mode-blurb'),
+  modePicks: el('lobby-modes'),
   mapName: el('map-name'),
   mapBlurb: el('map-blurb'),
   mapPicks: el('lobby-maps'),
@@ -118,6 +129,10 @@ const scene: Scene = {
   showdown: false,
   killcam: null,
   world: openWorld(STANDARD_ARENA),
+  mode: 'classic',
+  round: null,
+  brief: null,
+  cycle: 0,
 };
 
 let panel: 'menu' | 'lobby' | 'result' | null = 'menu';
@@ -254,6 +269,27 @@ const mapPicks = (['random', ...MAP_IDS] as MapChoice[]).map((map) => {
   return { map, button };
 });
 
+/** The four modes. Only the host's buttons do anything, and only in a party. */
+const modePicks = MODE_IDS.map((mode) => {
+  const button = document.createElement('button');
+  button.className = 'key';
+  button.textContent = MODE_NAMES[mode];
+  button.addEventListener('click', () => net.send({ t: 'mode', mode }));
+  dom.modePicks.append(button);
+  return { mode, button };
+});
+
+function showMode(choice: ModeId, host: boolean, party: boolean, seated: number): void {
+  const short = seated < MODE_MIN_PLAYERS[choice];
+  dom.modeName.textContent = party ? MODE_NAMES[choice] : `Next: ${MODE_NAMES[choice]}`;
+  dom.modeBlurb.textContent = short ? `Needs ${MODE_MIN_PLAYERS[choice]} fighters or more.` : MODE_BLURBS[choice];
+  dom.modeBlurb.classList.toggle('warn', short);
+  for (const { mode, button } of modePicks) {
+    button.classList.toggle('mine', mode === choice);
+    button.disabled = !host || !party;
+  }
+}
+
 function showMap(choice: MapChoice, host: boolean, party: boolean): void {
   dom.mapName.textContent = choice === 'random' ? 'Random' : MAP_NAMES[choice];
   dom.mapBlurb.textContent = choice === 'random' ? 'A different arena every match.' : MAP_BLURBS[choice];
@@ -298,7 +334,8 @@ function handle(msg: ServerMessage): void {
       dom.lobbyCode.textContent = msg.code ?? '';
       dom.lobbyCount.textContent = `${msg.players.length}/${MAX_PLAYERS}`;
       dom.btnStart.hidden = !msg.code || !msg.host;
-      dom.btnStart.disabled = msg.players.length < 2;
+      dom.btnStart.disabled = msg.players.length < Math.max(2, MODE_MIN_PLAYERS[msg.gameMode]);
+      showMode(msg.gameMode, msg.host, msg.code !== null, msg.players.length);
       isHost = msg.host;
       dom.botRow.hidden = !msg.code || !msg.host;
       dom.btnBot.disabled = msg.players.length >= MAX_PLAYERS;
@@ -327,7 +364,12 @@ function handle(msg: ServerMessage): void {
           row.append(swatch(p.color), document.createTextNode(p.name));
           if (p.wins > 0) row.append(label('wins', `${p.wins}W`));
           row.append(tag);
-          if (p.bot && isHost && msg.code) row.append(kickButton(p.id));
+          if (p.id !== msg.selfId) {
+            if (msg.code && isHost) row.append(kickButton(p));
+            else if (msg.votesNeeded !== null && !p.bot) {
+              row.append(voteButton(p.id, msg.votes[p.id] ?? 0, msg.votesNeeded, msg.voted.includes(p.id)));
+            }
+          }
           return row;
         }),
       );
@@ -358,6 +400,10 @@ function handle(msg: ServerMessage): void {
       scene.watch = [];
       scene.spectating = false;
       scene.inMatch = true;
+      scene.mode = msg.gameMode;
+      scene.round = null;
+      scene.brief = null;
+      scene.cycle = 0;
       scene.showdown = false;
       scene.killcam = null;
       lastRemaining = msg.startCount;
@@ -376,7 +422,8 @@ function handle(msg: ServerMessage): void {
     case 'lights': {
       const now = performance.now();
       const shrinking = scene.lights !== null && msg.size !== msg.previousSize;
-      const entering = msg.remaining === 2 && !msg.replay && (lastRemaining > 2 || msg.round === 0);
+      const entering =
+        scene.mode === 'classic' && msg.remaining === 2 && !msg.replay && (lastRemaining > 2 || msg.round === 0);
       lastRemaining = msg.remaining;
       const before = scene.world;
       scene.world = { ...before, size: msg.size, broken: new Set(msg.broken) };
@@ -391,8 +438,9 @@ function handle(msg: ServerMessage): void {
       music.setStage(msg.stage);
 
       const me = msg.players.find((p) => p.id === scene.selfId);
-      scene.self = me?.alive ? { x: me.x, y: me.y, aim: me.aim } : null;
-      if (scene.inMatch && !scene.self) scene.spectating = true;
+      scene.self = me?.alive && !extracted() ? { x: me.x, y: me.y, aim: me.aim } : null;
+      // Round modes bring everyone back each round, so this goes both ways.
+      scene.spectating = scene.inMatch && !scene.self;
 
       // The match-ending round is told by the killcam, not the usual reveal.
       if (msg.replay) {
@@ -423,8 +471,23 @@ function handle(msg: ServerMessage): void {
       return;
     }
 
+    case 'round':
+      scene.round = { info: msg, at: performance.now() };
+      if (!msg.outcome) scene.cycle = 0;
+      return;
+
+    case 'brief':
+      scene.brief = msg.brief;
+      // A finished or failed Assassin leaves the arena and watches the rest.
+      if (extracted()) {
+        scene.self = null;
+        scene.spectating = true;
+      }
+      return;
+
     case 'dark': {
       scene.phase = 'dark';
+      if (scene.mode !== 'classic') scene.cycle++;
       scene.darkAt = performance.now();
       scene.darkEndsAt = scene.darkAt + msg.durationMs;
       locked = false;
@@ -469,13 +532,22 @@ function handle(msg: ServerMessage): void {
       if (!scene.killcam && won) sfx.win();
       dom.resultStats.textContent = personalStats(msg.standings.find((s) => s.id === scene.selfId));
 
-      dom.resultTitle.textContent = won ? 'Victory' : champion ? 'Eliminated' : 'Draw';
+      // Classic is won by surviving; the round modes by points.
+      const scored = msg.gameMode !== 'classic';
+      const modeName = MODE_NAMES[msg.gameMode];
+      dom.resultTitle.textContent = won ? 'Victory' : !champion ? 'Draw' : scored ? 'Defeat' : 'Eliminated';
       dom.resultTitle.className = won ? 'victory' : champion ? '' : 'draw';
-      dom.resultDetail.textContent = won
-        ? `Last standing after ${msg.rounds} rounds`
-        : champion
-          ? `${champion.name} took it`
-          : 'Everyone went down at once';
+      dom.resultDetail.textContent = scored
+        ? won
+          ? `Top score in ${modeName} after ${msg.rounds} rounds`
+          : champion
+            ? `${champion.name} wins ${modeName}`
+            : `Tied at the top after ${msg.rounds} rounds`
+        : won
+          ? `Last standing after ${msg.rounds} rounds`
+          : champion
+            ? `${champion.name} took it`
+            : 'Everyone went down at once';
 
       const portrait = champion ?? scene.roster.get(scene.selfId);
       dom.resultSprite.hidden = !portrait;
@@ -487,16 +559,16 @@ function handle(msg: ServerMessage): void {
           const row = document.createElement('li');
           if (standing.id === msg.winner) row.classList.add('winner');
 
-          const tag = label(
-            'tag',
-            standing.id === msg.winner ? 'Won' : `R${String(standing.roundsSurvived).padStart(2, '0')}`,
-          );
+          const status = standing.id === msg.winner ? 'Won' : scored ? '' : `R${String(standing.roundsSurvived).padStart(2, '0')}`;
+          const stat = scored
+            ? `${standing.score ?? 0} PTS \u00b7 ${standing.kills}K`
+            : `${standing.kills}K \u00b7 ${msg.wins[standing.id] ?? 0}W`;
 
           row.append(
             swatch(fighter ? `#${fighter.color.toString(16).padStart(6, '0')}` : '#ccd6e2'),
             document.createTextNode(`${i + 1}. ${fighter?.name ?? '???'}`),
-            label('stat', `${standing.kills}K \u00b7 ${msg.wins[standing.id] ?? 0}W`),
-            tag,
+            label(scored ? 'stat score' : 'stat', stat),
+            label('tag', status),
           );
           return row;
         }),
@@ -514,6 +586,14 @@ function handle(msg: ServerMessage): void {
       }, Math.max(0, killcamLeft) + 450);
       return;
     }
+
+    case 'kicked':
+      scene.inMatch = false;
+      scene.killcam = null;
+      music.stop();
+      show('menu');
+      dom.menuError.textContent = msg.vote ? 'The others voted you out.' : 'The host removed you from the party.';
+      return;
 
     case 'err':
       dom.menuError.textContent = msg.msg;
@@ -659,12 +739,25 @@ function roomSound(kind: 'crate' | 'teleport' | 'bounce'): void {
   if (ctx && out) obstacleSound(kind, ctx, out);
 }
 
-function kickButton(id: string): HTMLElement {
+/** Party host: removes a bot, or kicks a person. */
+function kickButton(player: LobbyPlayer): HTMLElement {
   const button = document.createElement('button');
   button.className = 'kick';
   button.textContent = '\u00d7';
-  button.title = 'Remove bot';
-  button.addEventListener('click', () => net.send({ t: 'bot', add: false, id }));
+  button.title = player.bot ? 'Remove bot' : `Kick ${player.name}`;
+  button.addEventListener('click', () =>
+    net.send(player.bot ? { t: 'bot', add: false, id: player.id } : { t: 'kick', id: player.id }),
+  );
+  return button;
+}
+
+/** Matchmaking: a vote to remove someone, with the running tally. Click again to take it back. */
+function voteButton(id: string, votes: number, needed: number, mine: boolean): HTMLElement {
+  const button = document.createElement('button');
+  button.className = mine ? 'vote mine' : 'vote';
+  button.textContent = votes > 0 ? `Kick ${votes}/${needed}` : 'Kick';
+  button.title = mine ? 'Take back your vote' : `Vote to kick (${needed} votes needed)`;
+  button.addEventListener('click', () => net.send({ t: 'kick', id }));
   return button;
 }
 
@@ -673,6 +766,11 @@ function label(className: string, text: string): HTMLElement {
   span.className = className;
   span.textContent = text;
   return span;
+}
+
+/** An Assassin whose contract is finished, either way, is out of the round. */
+function extracted(): boolean {
+  return scene.mode === 'assassin' && scene.brief !== null && scene.brief.status !== 'live';
 }
 
 function flashRed(): void {
@@ -705,8 +803,10 @@ function loop(now: number): void {
 
   if (scene.phase === 'dark' && scene.lights) {
     if (scene.self && !frozen) {
-      const moved = stepPlayer(scene.self, dir.x, dir.y, dt, scene.world);
-      const jump = teleportStep(moved, scene.world, onPad);
+      const free = stepPlayer(scene.self, dir.x, dir.y, dt, scene.world);
+      const path = scene.brief?.role === 'target' ? scene.brief.path?.legs : undefined;
+      const moved = path ? onPath(free, path) : free;
+      const jump = path ? { ...moved, onPad, jumped: false } : teleportStep(moved, scene.world, onPad);
       onPad = jump.onPad;
       if (jump.jumped) {
         renderer.teleported(moved, jump, scene.roster.get(scene.selfId)?.color ?? 0xccd6e2, now);

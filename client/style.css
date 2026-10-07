@@ -453,6 +453,45 @@ li .wins {
   border-color: var(--amber);
 }
 
+/* --- Mode ---------------------------------------------------------- */
+
+/* Four modes in a row, picked the same way as the arena below. */
+.mode-picks {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.mode-picks .key {
+  padding: 7px 2px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.mode-picks .key.mine {
+  color: var(--void);
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+.mode-picks .key:disabled.mine {
+  opacity: 1;
+}
+
+#mode-blurb {
+  margin-top: -8px;
+  text-transform: none;
+  letter-spacing: 0.08em;
+}
+
+#mode-blurb.warn {
+  color: var(--red);
+}
+
+li .stat.score {
+  color: var(--pale);
+}
+
 /* --- Arena and bots ------------------------------------------------ */
 
 .map-picks {
@@ -506,6 +545,24 @@ li .kick {
 
 li .kick:hover {
   color: var(--red);
+}
+
+li .vote {
+  font: inherit;
+  font-size: 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--metal-light);
+  background: none;
+  border: 1px solid var(--metal);
+  padding: 1px 4px;
+  cursor: pointer;
+}
+
+li .vote:hover,
+li .vote.mine {
+  color: var(--red);
+  border-color: var(--red);
 }
 
 .finisher-picks .group {

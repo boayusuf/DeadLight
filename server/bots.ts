@@ -11,6 +11,7 @@ import {
   type Segment,
   type World,
 } from '../shared/maps.js';
+import { onPath, type Leg, type ModeId, type Role } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { BotDifficulty, ServerMessage } from '../shared/protocol.js';
 
@@ -119,6 +120,12 @@ export class BotBrain {
   private darkStart: number | null = null;
   private lastThink = 0;
   private plan: Plan | null = null;
+  /** Round modes: what this bot is, and whom it is meant to shoot. */
+  private mode: ModeId = 'classic';
+  private role: Role | null = null;
+  private focus: string | null = null;
+  private contract: string | null = null;
+  private path: readonly Leg[] | null = null;
   private move = STILL;
 
   constructor(
@@ -135,7 +142,7 @@ export class BotBrain {
   hear(msg: ServerMessage): void {
     switch (msg.t) {
       case 'match':
-        this.onMatch(msg.startCount, msg.map);
+        this.onMatch(msg.startCount, msg.map, msg.gameMode);
         break;
       case 'lights':
         this.onLights(msg);
@@ -146,6 +153,15 @@ export class BotBrain {
         this.darkStart = null;
         this.plan = null;
         this.me = { ...this.lastSelf };
+        break;
+      case 'round':
+        this.mode = msg.mode;
+        this.focus = msg.focus;
+        break;
+      case 'brief':
+        this.role = msg.brief.role;
+        this.contract = msg.brief.contract ?? null;
+        this.path = msg.brief.path?.legs ?? null;
         break;
       case 'self':
         if (this.dark) {
@@ -175,7 +191,12 @@ export class BotBrain {
     return { ...this.move, aim: plan.aim };
   }
 
-  private onMatch(startCount: number, map: Parameters<typeof layoutFor>[0]): void {
+  private onMatch(startCount: number, map: Parameters<typeof layoutFor>[0], mode: ModeId): void {
+    this.mode = mode;
+    this.role = null;
+    this.focus = null;
+    this.contract = null;
+    this.path = null;
     const size = arenaSize(startCount, 0);
     this.world = { size, layout: layoutFor(map, size), broken: new Set() };
     this.alive = true;
@@ -191,6 +212,8 @@ export class BotBrain {
     this.world = { size: msg.size, layout: this.world.layout, broken: new Set(msg.broken) };
     this.dark = false;
     const before = this.seenRaw;
+    // A hidden Ghost is missing from the reveal: hunt it from where it was last seen.
+    const ghost = this.mode === 'ghost' && this.focus ? this.sight.get(this.focus) : undefined;
     this.sight = new Map();
     this.seenRaw = new Map();
     this.trend = new Map();
@@ -209,7 +232,16 @@ export class BotBrain {
       }
     }
     if (!seenSelf) this.alive = false;
+    if (ghost && this.focus && !this.sight.has(this.focus) && msg.resolution) this.sight.set(this.focus, ghost);
     this.me = { ...this.lastSelf };
+  }
+
+  /** Whom this bot is trying to hit. Everyone, outside the round modes. */
+  private wants(id: string): boolean {
+    if (this.role === 'hunter') return id === this.focus;
+    if (this.role === 'ghost') return false;
+    if (this.role === 'assassin' && this.contract && this.sight.has(this.contract)) return id === this.contract;
+    return true;
   }
 
   private beginBlackout(now: number): void {
@@ -217,7 +249,9 @@ export class BotBrain {
     this.lastThink = now;
     this.move = STILL;
     const reach = Math.max(0, ((this.durationMs - MOVE_MARGIN_MS) / 1000) * MOVE_SPEED * REACH_EFFICIENCY);
-    const spot = this.chooseSpot(reach);
+    const chosen = this.chooseSpot(reach);
+    // A Target can only end up somewhere on its path, so it plans to be there.
+    const spot = this.path ? { dest: onPath(chosen.dest, this.path), via: null } : chosen;
     this.plan = {
       ...spot,
       aim: this.chooseAim(spot.dest),
@@ -464,7 +498,7 @@ export class BotBrain {
       w,
     });
 
-    return [...this.sight].map(([id, seen]) => {
+    return [...this.sight].filter(([id]) => this.wants(id)).map(([id, seen]) => {
       const trend = capLength(this.trend.get(id) ?? { x: 0, y: 0 }, MAX_TREND);
       if (this.difficulty === 'easy') return [guess(seen, trend, 0, 1)];
       if (this.difficulty === 'normal') return [guess(seen, trend, 0.5, 1)];

@@ -250,13 +250,23 @@ describe('Match', () => {
   it('cuts power to all cover when the last two stall, but keeps floor machinery', () => {
     const pillars = new Match(ROSTER, (msg) => sent.push(msg), clock, 'pillars');
     match = pillars;
-    sent.length = 0;
-    // Both spawns face the centre and cancel each other: a stall every round.
+    // Spawns are random, so a spawn aim can land a kill. Both look away from
+    // each other instead: a stall every round.
+    let seq = 0;
+    const lookAway = () => {
+      const a = find('a');
+      const b = find('b');
+      seq++;
+      match.input('a', seq, 0, 0, aimAt(a, b) + Math.PI);
+      match.input('b', seq, 0, 0, aimAt(b, a) + Math.PI);
+    };
     for (let round = 1; round < STALL_ROUNDS; round++) {
       runUntil('dark');
+      lookAway();
       expect(runUntil('lights').broken).toEqual([]);
     }
     runUntil('dark');
+    lookAway();
     const cut = runUntil('lights').broken;
     expect(cut.length).toBeGreaterThan(0);
     expect(cut.every((id) => id.startsWith('pillar'))).toBe(true);

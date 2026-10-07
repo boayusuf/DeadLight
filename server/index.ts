@@ -112,12 +112,18 @@ wss.on('connection', (socket: WebSocket) => {
       case 'finisher':
         room?.setFinisher(id, msg.finisher);
         return;
+      case 'mode':
+        room?.setMode(id, msg.mode);
+        return;
       case 'map':
         room?.setMap(id, msg.map);
         return;
       case 'bot':
         if (msg.add) room?.addBot(id, msg.difficulty);
         else room?.removeBot(id, msg.id);
+        return;
+      case 'kick':
+        lobby.kick(id, msg.id, now);
         return;
       case 'input':
         room?.input(

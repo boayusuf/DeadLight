@@ -11,7 +11,8 @@ import {
   STAGE_SCALE,
 } from '../shared/constants.js';
 import type { FinisherId } from '../shared/constants.js';
-import type { ReplayTrack, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
+import { CONTRACT_KILLS, MODE_NAMES, PATH_NAMES, ROUND_CYCLES, type Leg, type ModeId } from '../shared/modes.js';
+import type { Brief, ReplayTrack, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
 import { killerOf } from './callouts.js';
 import { Finishers, type FinisherView } from './finishers.js';
@@ -89,7 +90,18 @@ export interface Scene {
   killcam: Killcam | null;
   /** The map and its state, as of the last lights. */
   world: World;
+  mode: ModeId;
+  /** Round modes: the latest public round message, and when it arrived. */
+  round: { info: Extract<ServerMessage, { t: 'round' }>; at: number } | null;
+  /** Round modes: this fighter's private orders. */
+  brief: Brief | null;
+  /** Blackouts played so far in the current round. */
+  cycle: number;
 }
+
+/** Shown on the band at the start of a round, then cleared for play. */
+const ROUND_BANNER_MS = 1650;
+const ROUND_RESULT_DELAY_MS = 520;
 
 /* ---------------------------------------------------------------------------
  * Palette: a cold, decommissioned facility. Greys and steel carry the room,
@@ -110,6 +122,8 @@ const PILLAR_FACE = 0x2b323c;
 const PILLAR_LIGHT = 0x3e4855;
 const PILLAR_DARK = 0x171b21;
 const AMBER = 0xd9953a;
+/** Assassin contracts: the one colour that means 'yours to kill'. */
+const HAZARD = 0xc2504a;
 const AMBER_DIM = 0x7a5320;
 const EMERGENCY = 0x8f2420;
 const KILLCAM_RED = 0xd8433f;
@@ -525,6 +539,7 @@ export class Renderer {
     if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'floor');
     this.drawScorches(scene, size, lit);
     if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'solid');
+    if (scene.inMatch && scene.brief?.path && scene.self) this.drawTargetPath(scene.brief.path.legs, lit, now);
 
     if (scene.inMatch) {
       if (lit) this.drawLitRound(scene, size, now);
@@ -546,6 +561,7 @@ export class Renderer {
       this.drawHud(scene, now);
       this.drawCallout(now);
       this.drawIntro(now);
+      if (scene.mode !== 'classic') this.drawRoundBanner(scene, now);
     }
 
     buffer.present(this.ctx, this.scale);
@@ -860,9 +876,15 @@ export class Renderer {
       // Snapshots hold where each shot was fired from; the shrinking wall then
       // visibly pushes anyone caught outside it.
       const player = { ...shown, ...clampToArena(shown, size, PLAYER_RADIUS) };
+      const ghostly = this.isGhost(scene, shown.id);
 
       if (player.alive) {
-        this.drawFighter(player, fighter, now, { walking: false });
+        this.drawFighter(player, fighter, now, {
+          walking: false,
+          alpha: ghostly ? 0.5 : 1,
+          rim: ghostly ? 0.35 : undefined,
+        });
+        this.drawRoleMark(scene, player, now);
         continue;
       }
       const dying = clamp01((elapsed - RESOLVE_DELAY_MS - HIT_STOP_MS) / DEATH_FADE_MS);
@@ -887,8 +909,11 @@ export class Renderer {
         0.1,
       );
       this.drawPath(this.traceFrom(scene.self, scene.world), fighter.color, 0.95, now, 1, false);
+      const ghostly = this.isGhost(scene, scene.selfId);
       this.drawFighter({ ...scene.self, id: scene.selfId, alive: true }, fighter, now, {
         walking: this.moving,
+        alpha: ghostly ? 0.5 : 1,
+        rim: ghostly ? 0.35 : undefined,
       });
       return;
     }
@@ -1177,17 +1202,21 @@ export class Renderer {
     const pad = 7;
     const cx = Math.round(buffer.width / 2);
 
-    buffer.text(`ROUND ${String(Math.max(lights.round, 1)).padStart(2, '0')}`, pad, pad, INK, 0.8 * dim);
-    buffer.text(`ALIVE ${String(lights.remaining).padStart(2, '0')}`, pad, pad + 8, INK, 0.8 * dim);
+    if (scene.mode === 'classic') {
+      buffer.text(`ROUND ${String(Math.max(lights.round, 1)).padStart(2, '0')}`, pad, pad, INK, 0.8 * dim);
+      buffer.text(`ALIVE ${String(lights.remaining).padStart(2, '0')}`, pad, pad + 8, INK, 0.8 * dim);
 
-    const stage = `STAGE ${String(lights.stage + 1).padStart(2, '0')}`;
-    buffer.text(stage, cx - Math.round(buffer.textWidth(stage, 2) / 2), pad, PALE, 0.95 * dim, 2);
+      const stage = `STAGE ${String(lights.stage + 1).padStart(2, '0')}`;
+      buffer.text(stage, cx - Math.round(buffer.textWidth(stage, 2) / 2), pad, PALE, 0.95 * dim, 2);
 
-    const pipW = 9;
-    const pipsX = cx - Math.round((STAGE_COUNT * pipW - 3) / 2);
-    for (let i = 0; i < STAGE_COUNT; i++) {
-      const on = i <= lights.stage;
-      buffer.rect(pipsX + i * pipW, pad + 13, pipW - 3, 2, on ? AMBER : METAL, (on ? 0.95 : 0.4) * dim);
+      const pipW = 9;
+      const pipsX = cx - Math.round((STAGE_COUNT * pipW - 3) / 2);
+      for (let i = 0; i < STAGE_COUNT; i++) {
+        const on = i <= lights.stage;
+        buffer.rect(pipsX + i * pipW, pad + 13, pipW - 3, 2, on ? AMBER : METAL, (on ? 0.95 : 0.4) * dim);
+      }
+    } else {
+      this.drawModeHud(scene, dim, pad, cx);
     }
 
     // The one timer that matters: how much relocation time is left.
@@ -1220,6 +1249,176 @@ export class Renderer {
       scene.phase === 'dark' ? 0.45 : 0.6,
     );
   }
+
+  // ------------------------------------------------------------- round modes ---
+
+  private isGhost(scene: Scene, id: string): boolean {
+    return scene.mode === 'ghost' && scene.round?.info.focus === id;
+  }
+
+  /**
+   * The Target's path, drawn only for the Target: a run of amber floor
+   * markings, bright enough to follow in the dark.
+   */
+  private drawTargetPath(legs: readonly Leg[], lit: boolean, now: number): void {
+    const buffer = this.buffer;
+    const alpha = lit ? 0.55 : 0.4;
+    const crawl = Math.floor(now / 90) % 6;
+    for (const leg of legs) {
+      const x0 = this.px(leg.ax);
+      const y0 = this.py(leg.ay);
+      const x1 = this.px(leg.bx);
+      const y1 = this.py(leg.by);
+      const steps = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0)));
+      for (let i = 0; i <= steps; i++) {
+        // Dashes that creep along the path, so it reads as a route, not a wall.
+        if ((i + crawl) % 6 > 3) continue;
+        buffer.blend(Math.round(lerp(x0, x1, i / steps)), Math.round(lerp(y0, y1, i / steps)), AMBER, alpha);
+      }
+      buffer.rect(x0 - 1, y0 - 1, 3, 3, AMBER, alpha);
+      buffer.rect(x1 - 1, y1 - 1, 3, 3, AMBER, alpha);
+    }
+  }
+
+  /**
+   * Marks above heads, from what this client was told: the Target or Ghost for
+   * everyone, and an Assassin's own contract for that Assassin alone.
+   */
+  private drawRoleMark(scene: Scene, player: SnapshotPlayer, now: number): void {
+    const focus = scene.round?.info.focus;
+    const contract = scene.brief?.status === 'live' ? scene.brief.contract : undefined;
+    const marked = (scene.mode === 'hunted' || scene.mode === 'ghost') && player.id === focus;
+    const hunted = scene.mode === 'assassin' && player.id === contract;
+    if (!marked && !hunted) return;
+
+    const buffer = this.buffer;
+    const x = this.px(player.x);
+    const y = this.py(player.y) - 20 - (Math.floor(now / 300) % 2);
+    const color = hunted ? HAZARD : AMBER;
+    // A hard downward chevron, row by row.
+    for (let row = 0; row < 3; row++) {
+      buffer.rect(x - 3 + row, y + row, 7 - row * 2, 1, color, 0.95);
+    }
+  }
+
+  private drawModeHud(scene: Scene, dim: number, pad: number, cx: number): void {
+    const buffer = this.buffer;
+    const round = scene.round?.info;
+    const mode = MODE_NAMES[scene.mode].toUpperCase();
+    buffer.text(mode, cx - Math.round(buffer.textWidth(mode, 2) / 2), pad, PALE, 0.95 * dim, 2);
+
+    if (round) {
+      const label = `ROUND ${String(round.round).padStart(2, '0')}/${String(round.rounds).padStart(2, '0')}`;
+      buffer.text(label, cx - Math.round(buffer.textWidth(label) / 2), pad + 13, INK, 0.8 * dim);
+    }
+
+    // One pip per blackout in the round: how much of it is left.
+    if (scene.mode !== 'classic') {
+      const cycles = ROUND_CYCLES[scene.mode];
+      const pipW = 9;
+      const pipsX = cx - Math.round((cycles * pipW - 3) / 2);
+      for (let i = 0; i < cycles; i++) {
+        const spent = i < scene.cycle;
+        buffer.rect(pipsX + i * pipW, pad + 20, pipW - 3, 2, spent ? METAL : AMBER, (spent ? 0.4 : 0.95) * dim);
+      }
+    }
+
+    // Your part in the round, top left.
+    const brief = scene.brief;
+    if (brief) {
+      const focusName = round?.focus ? (scene.roster.get(round.focus)?.name ?? '').toUpperCase() : '';
+      const lines: [string, number][] = [];
+      if (brief.role === 'target') lines.push(['YOU: TARGET', AMBER], ['STAY ON YOUR PATH', INK]);
+      else if (brief.role === 'ghost') lines.push(['YOU: GHOST', AMBER], ['NO WEAPON. HIDE.', INK]);
+      else if (brief.role === 'hunter') {
+        lines.push(['YOU: HUNTER', PALE], [`${scene.mode === 'ghost' ? 'FIND' : 'HUNT'} ${focusName}`, INK]);
+      } else {
+        const name = brief.contract ? (scene.roster.get(brief.contract)?.name ?? '').toUpperCase() : '';
+        lines.push([`TARGET: ${name}`, HAZARD]);
+        if (brief.status === 'complete') lines.push(['CONTRACT DONE', AMBER]);
+        else if (brief.status === 'failed') lines.push(['CONTRACT LOST', HAZARD]);
+        else lines.push([`OTHERS ${brief.progress ?? 0}/${CONTRACT_KILLS}`, INK]);
+      }
+      lines.forEach(([text, color], i) => buffer.text(text, pad, pad + i * 8, color, 0.9 * dim));
+    }
+
+    // Scores, top right: best first, you highlighted.
+    if (round) {
+      const rows = [...scene.roster]
+        .map(([id, f]) => ({ id, name: f.name.toUpperCase().slice(0, 8), color: f.color, score: round.scores[id] ?? 0 }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 6);
+      rows.forEach((row, i) => {
+        const y = pad + i * 8;
+        const score = String(row.score);
+        const right = buffer.width - pad;
+        const mine = row.id === scene.selfId;
+        buffer.text(score, right - buffer.textWidth(score), y, mine ? PALE : INK, 0.9 * dim);
+        const nameX = right - buffer.textWidth(score) - 6 - buffer.textWidth(row.name);
+        buffer.text(row.name, nameX, y, mine ? PALE : INK, 0.75 * dim);
+        buffer.rect(nameX - 6, y + 1, 3, 3, row.color, 0.95 * dim);
+      });
+    }
+  }
+
+  /** The band across the middle that opens and closes each round. */
+  private drawRoundBanner(scene: Scene, now: number): void {
+    const round = scene.round;
+    if (!round || !scene.lights) return;
+    const age = now - round.at;
+    const buffer = this.buffer;
+    const mid = Math.round(buffer.height / 2);
+
+    if (!round.info.outcome) {
+      if (age > ROUND_BANNER_MS) return;
+      const fade = clamp01((ROUND_BANNER_MS - age) / 250) * clamp01(age / 120);
+      const [title, sub, color] = this.introLines(scene);
+      buffer.rect(0, mid - 26, buffer.width, 50, 0x000000, 0.62 * fade);
+      this.shout(`ROUND ${round.info.round}`, mid - 22, 1, INK, fade);
+      this.shout(title, mid - 12, 3, color, fade);
+      if (sub) this.shout(sub, mid + 12, 1, PALE, fade);
+      return;
+    }
+
+    const shown = age - ROUND_RESULT_DELAY_MS;
+    if (shown < 0 || scene.phase !== 'lights') return;
+    const fade = clamp01(shown / 160);
+    const [title, sub, color] = this.resultLines(scene);
+    buffer.rect(0, mid - 20, buffer.width, 40, 0x000000, 0.62 * fade);
+    this.shout(title, mid - 14, 3, color, fade);
+    if (sub) this.shout(sub, mid + 8, 1, PALE, fade);
+  }
+
+  private introLines(scene: Scene): [string, string, number] {
+    const info = scene.round!.info;
+    const brief = scene.brief;
+    const focusName = info.focus ? (scene.roster.get(info.focus)?.name ?? '').toUpperCase() : '';
+    if (scene.mode === 'assassin') {
+      const name = brief?.contract ? (scene.roster.get(brief.contract)?.name ?? '').toUpperCase() : '';
+      return [`TARGET: ${name}`, `OR ANY ${CONTRACT_KILLS} OTHERS`, HAZARD];
+    }
+    if (brief?.role === 'target' && brief.path) {
+      return ['YOU ARE HUNTED', `PATH: ${PATH_NAMES[brief.path.shape].toUpperCase()}`, AMBER];
+    }
+    if (brief?.role === 'ghost') return ['YOU ARE THE GHOST', 'NO WEAPON. THEY CANNOT SEE YOU.', AMBER];
+    if (scene.mode === 'ghost') return [`FIND ${focusName}`, 'IT VANISHES WHEN THE LIGHTS GO', PALE];
+    return [`HUNT ${focusName}`, 'THE TARGET IS HELD TO A PATH', PALE];
+  }
+
+  private resultLines(scene: Scene): [string, string, number] {
+    const outcome = scene.round!.info.outcome!;
+    const name = (id: string) => (scene.roster.get(id)?.name ?? '').toUpperCase();
+    if (outcome.kind === 'caught') {
+      const sub = outcome.winners.length ? `${outcome.winners.map(name).join(' + ')} +1` : 'NOBODY SCORES';
+      return [scene.mode === 'ghost' ? 'GHOST FOUND' : 'TARGET DOWN', sub, PALE];
+    }
+    if (outcome.kind === 'escaped') {
+      return [`${scene.mode === 'ghost' ? 'GHOST' : 'TARGET'} ESCAPED`, `${name(outcome.focus)} +1`, AMBER];
+    }
+    if (outcome.winners.length === 0) return ['NO CONTRACTS', 'NOBODY FINISHED THE JOB', INK];
+    return ['CONTRACTS', `${outcome.winners.map(name).join(' + ')} +1`, HAZARD];
+  }
+
 
   /** Names are interface, not world art, so they stay crisp at a fixed size. */
   private drawNameplates(scene: Scene, size: number): void {

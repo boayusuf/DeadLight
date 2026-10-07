@@ -31,7 +31,7 @@ const roster = (ids: string[]): LobbyPlayer[] =>
 /** Introduces a brain to a match and shows it one lights-on reveal. */
 function introduce(brain: BotBrain, fighters: Fighter[], map: MapId = 'reactor'): number {
   const size = arenaSize(fighters.length, 0);
-  brain.hear({ t: 'match', players: roster(fighters.map((f) => f.id)), startCount: fighters.length, map });
+  brain.hear({ t: 'match', players: roster(fighters.map((f) => f.id)), startCount: fighters.length, map, gameMode: 'classic' });
   brain.hear({
     t: 'lights',
     round: 0,
@@ -93,7 +93,7 @@ describe('BotBrain before a match', () => {
     introduce(brain, [{ id: 'b', x: 0, y: 0 }, { id: 'o', x: 200, y: 0 }]);
     brain.hear({ t: 'dark', round: 1, durationMs: 2500 });
     expect(brain.think(0)).not.toBeNull();
-    brain.hear({ t: 'over', winner: 'b', rounds: 1, standings: [], wins: {} });
+    brain.hear({ t: 'over', winner: 'b', rounds: 1, standings: [], wins: {}, gameMode: 'classic' });
     expect(brain.think(100)).toBeNull();
   });
 
@@ -311,5 +311,61 @@ describe('BOT_NAMES', () => {
     expect(new Set(BOT_NAMES).size).toBe(BOT_NAMES.length);
     expect(BOT_NAMES.length).toBeGreaterThanOrEqual(9);
     for (const name of BOT_NAMES) expect(name.length).toBeLessThanOrEqual(10);
+  });
+});
+
+describe('BotBrain in the round modes', () => {
+  const size = arenaSize(3, 0);
+  const world = openWorld(size);
+
+  /** Seats a bot in a round mode and gives it its orders. */
+  function brief(brain: BotBrain, mode: 'hunted' | 'ghost', focus: string, fighters: Fighter[]): void {
+    brain.hear({ t: 'match', players: roster(fighters.map((f) => f.id)), startCount: fighters.length, map: 'reactor', gameMode: mode });
+    brain.hear({ t: 'round', mode, round: 1, rounds: 6, focus, scores: {}, outcome: null });
+    brain.hear({ t: 'brief', brief: { role: 'hunter' } });
+    brain.hear({
+      t: 'lights',
+      round: 0,
+      stage: 0,
+      size,
+      previousSize: size,
+      players: fighters.map((f) => ({ id: f.id, x: f.x, y: f.y, aim: 0, alive: true })),
+      resolution: null,
+      remaining: fighters.length,
+      holdMs: 1800,
+      broken: [],
+    });
+  }
+
+  it('aims at the target, not at the hunter standing closer', () => {
+    const brain = new BotBrain('b', 'hard', seeded(4));
+    const target = { id: 't', x: 0, y: 260 };
+    brief(brain, 'hunted', 't', [{ id: 'b', x: 0, y: -260 }, { id: 'h', x: 120, y: -200 }, target]);
+    const { end, aim } = blackout(brain, { x: 0, y: -260 }, world, STAND_STILL_MS);
+    expect(diff(aim, Math.atan2(target.y - end.y, target.x - end.x))).toBeLessThan(0.3);
+  });
+
+  it('keeps hunting a Ghost from where it was last seen once it vanishes', () => {
+    const brain = new BotBrain('b', 'hard', seeded(5));
+    const ghost = { id: 'g', x: -250, y: 0 };
+    brief(brain, 'ghost', 'g', [{ id: 'b', x: 250, y: 0 }, { id: 'h', x: 0, y: 250 }, ghost]);
+    // A mid-round reveal: the Ghost is not in it.
+    brain.hear({
+      t: 'lights',
+      round: 1,
+      stage: 0,
+      size,
+      previousSize: size,
+      players: [
+        { id: 'b', x: 250, y: 0, aim: 0, alive: true },
+        { id: 'h', x: 0, y: 250, aim: 0, alive: true },
+      ],
+      resolution: { beams: [], kills: [], duels: [], eliminated: [], broken: [] },
+      remaining: 3,
+      holdMs: 1200,
+      broken: [],
+    });
+    const { end, aim } = blackout(brain, { x: 250, y: 0 }, world, STAND_STILL_MS);
+    expect(diff(aim, Math.atan2(ghost.y - end.y, ghost.x - end.x))).toBeLessThan(0.3);
   });
 });
