@@ -1,5 +1,5 @@
-import { rayToWall } from './arena.js';
 import { BARREL_LENGTH, HIT_RADIUS } from './constants.js';
+import { traceBeam, type Segment, type World } from './maps.js';
 
 export interface Shooter {
   id: string;
@@ -8,12 +8,10 @@ export interface Shooter {
   aim: number;
 }
 
+/** A fired beam: one straight segment, plus one more for each mirror it bounced off. */
 export interface Beam {
   id: string;
-  ox: number;
-  oy: number;
-  ex: number;
-  ey: number;
+  segments: Segment[];
 }
 
 export interface Kill {
@@ -32,6 +30,8 @@ export interface Resolution {
   kills: Kill[];
   duels: Duel[];
   eliminated: string[];
+  /** Crates destroyed this round. */
+  broken: string[];
 }
 
 function beamOrigin(s: Shooter) {
@@ -60,31 +60,33 @@ function raySegmentHitsCircle(
  *
  * Beams pierce: every player a beam crosses is hit. Hits are then cancelled
  * pairwise — if two players hit each other, that pair neutralises and both
- * survive, but either beam still kills anyone else it crossed.
+ * survive, but either beam still kills anyone else it crossed. A beam that
+ * comes back off a mirror can hit its own shooter.
  */
-export function resolveRound(shooters: readonly Shooter[], size: number): Resolution {
+export function resolveRound(shooters: readonly Shooter[], world: World): Resolution {
   const beams: Beam[] = [];
   const hit = new Map<string, Set<string>>();
+  const broken = new Set<string>();
 
   for (const s of shooters) {
     const dir = { x: Math.cos(s.aim), y: Math.sin(s.aim) };
-    const origin = beamOrigin(s);
-    const length = rayToWall(origin, dir, size);
-    beams.push({
-      id: s.id,
-      ox: origin.x,
-      oy: origin.y,
-      ex: origin.x + dir.x * length,
-      ey: origin.y + dir.y * length,
-    });
+    const path = traceBeam(beamOrigin(s), dir, world);
+    beams.push({ id: s.id, segments: path.segments });
+    for (const id of path.struck) broken.add(id);
 
     const struck = new Set<string>();
-    for (const target of shooters) {
-      if (target.id === s.id) continue;
-      if (raySegmentHitsCircle(origin.x, origin.y, dir.x, dir.y, length, target.x, target.y, HIT_RADIUS)) {
-        struck.add(target.id);
+    path.segments.forEach((seg, i) => {
+      const dx = seg.ex - seg.ox;
+      const dy = seg.ey - seg.oy;
+      const length = Math.hypot(dx, dy);
+      if (length === 0) return;
+      for (const target of shooters) {
+        if (target.id === s.id && i === 0) continue;
+        if (raySegmentHitsCircle(seg.ox, seg.oy, dx / length, dy / length, length, target.x, target.y, HIT_RADIUS)) {
+          struck.add(target.id);
+        }
       }
-    }
+    });
     hit.set(s.id, struck);
   }
 
@@ -110,5 +112,5 @@ export function resolveRound(shooters: readonly Shooter[], size: number): Resolu
     }
   }
 
-  return { beams, kills, duels, eliminated: [...eliminated] };
+  return { beams, kills, duels, eliminated: [...eliminated], broken: [...broken] };
 }

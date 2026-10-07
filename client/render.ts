@@ -1,4 +1,5 @@
 import { arenaVertices, clampToArena, rayToWall } from '../shared/arena.js';
+import { traceBeam, type World } from '../shared/maps.js';
 import {
   BARREL_LENGTH,
   PLAYER_RADIUS,
@@ -9,10 +10,31 @@ import {
   STAGE_COUNT,
   STAGE_SCALE,
 } from '../shared/constants.js';
-import type { ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
+import type { FinisherId } from '../shared/constants.js';
+import type { ReplayTrack, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
+import type { Resolution } from '../shared/resolve.js';
+import { killerOf } from './callouts.js';
+import { Finishers, type FinisherView } from './finishers.js';
+import {
+  KILLCAM_BEATS,
+  KILLCAM_SLOWMO,
+  beatAt,
+  frameAround,
+  poseAt,
+  type Framing,
+  type KillcamBeat,
+} from './killcam.js';
+import { drawFinale, drawKillscreen, Splats, type Portrait } from './killscreen.js';
+import {
+  drawFloorObstacles,
+  drawSolidObstacles,
+  ObstacleFx,
+  type Crate,
+  type Lighting,
+} from './obstacles.js';
 import { ambientAt } from './lighting.js';
 import { PixelBuffer } from './pixel.js';
-import { SPRITE_W, facingFor, sprite, type Sprite } from './sprites.js';
+import { SPRITE_H, SPRITE_W, facingFor, sprite, type Sprite } from './sprites.js';
 
 type Lights = Extract<ServerMessage, { t: 'lights' }>;
 
@@ -20,6 +42,24 @@ export interface Fighter {
   name: string;
   color: number;
   archetype: number;
+  finisher: FinisherId;
+}
+
+/** The match-ending round, replayed. Starts the moment its lights arrive. */
+export interface Killcam {
+  startedAt: number;
+  lights: Lights;
+  /** The room as it stood during the replayed blackout, before this round broke anything. */
+  world: World;
+  /** Set once the finishers have gone off, so they spawn exactly once. */
+  spawned: boolean;
+  frames?: KillcamFrames;
+}
+
+interface KillcamFrames {
+  wide: Framing;
+  tight: Framing;
+  punch: Framing;
 }
 
 export interface Trace {
@@ -44,6 +84,11 @@ export interface Scene {
   scorches: Trace[];
   spectating: boolean;
   inMatch: boolean;
+  /** Two fighters left: the room runs on emergency light until the end. */
+  showdown: boolean;
+  killcam: Killcam | null;
+  /** The map and its state, as of the last lights. */
+  world: World;
 }
 
 /* ---------------------------------------------------------------------------
@@ -66,6 +111,9 @@ const PILLAR_LIGHT = 0x3e4855;
 const PILLAR_DARK = 0x171b21;
 const AMBER = 0xd9953a;
 const AMBER_DIM = 0x7a5320;
+const EMERGENCY = 0x8f2420;
+const KILLCAM_RED = 0xd8433f;
+const NIGHT = 0x05070b;
 const EMITTER = 0x7fc9b0;
 const PALE = 0xccd6e2;
 const INK = 0x79849a;
@@ -91,9 +139,38 @@ const SPRITE_FOOT = 8;
 const MUZZLE_LIFT = 2;
 const UNITS_PER_PX = 4;
 
+/** A beat of stillness on the killing hit, before anything goes off. */
+export const HIT_STOP_MS = 70;
+const CALLOUT_MS = 900;
+export const INTRO_MS = 1100;
+const FEED_MS = 5000;
+const FEED_MAX = 4;
+const LETTERBOX = 0.12;
+const SPEED_LABEL: Record<KillcamBeat, string> = {
+  intro: '<<',
+  replay: '1.6X',
+  shot: '0.2X',
+  freeze: 'HOLD',
+  cutin: '!!',
+  boom: '0.5X',
+  finale: 'END',
+};
+/** When the finisher goes off, ms into the killcam; its slowed clock starts here. */
+const BOOM_AT = KILLCAM_BEATS.slice(0, KILLCAM_BEATS.findIndex(([beat]) => beat === 'boom')).reduce(
+  (sum, [, ms]) => sum + ms,
+  0,
+);
+
 const clamp01 = (v: number) => Math.min(Math.max(v, 0), 1);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const hex = (color: number) => `#${color.toString(16).padStart(6, '0')}`;
+const between = (a: Framing, b: Framing, t: number): Framing => ({
+  x: lerp(a.x, b.x, t),
+  y: lerp(a.y, b.y, t),
+  zoom: lerp(a.zoom, b.zoom, t),
+});
 
 function mix(a: number, b: number, t: number): number {
   const r = lerp((a >> 16) & 0xff, (b >> 16) & 0xff, t);
@@ -128,6 +205,19 @@ interface Impact {
   born: number;
 }
 
+interface Callout {
+  title: string;
+  by: string | null;
+  color: number;
+  born: number;
+}
+
+interface FeedEntry {
+  killer: Fighter;
+  victim: Fighter;
+  born: number;
+}
+
 export class Renderer {
   private readonly buffer = new PixelBuffer();
   private readonly ctx: CanvasRenderingContext2D;
@@ -147,6 +237,23 @@ export class Renderer {
   private shake = 0;
   private moving = false;
   private impactedRound = -1;
+
+  private readonly finishers = new Finishers();
+  /** The killcam runs its finishers on a slowed clock, so they get their own set. */
+  private readonly replayFinishers = new Finishers();
+  private readonly splats = new Splats();
+  private readonly obstacleFx = new ObstacleFx();
+  private readonly view: FinisherView = {
+    buffer: this.buffer,
+    px: (wx) => this.px(wx),
+    py: (wy) => this.py(wy),
+  };
+  private callout: Callout | null = null;
+  private intro: { a: Fighter; b: Fighter; born: number } | null = null;
+  private feed: FeedEntry[] = [];
+  private holdUntil = 0;
+  /** This frame's shake, so the crisp-text layer can follow the world. */
+  private shift = { x: 0, y: 0 };
 
   /** Row spans of the octagon, rebuilt whenever the size changes. */
   private spanSize = -1;
@@ -216,24 +323,101 @@ export class Renderer {
     this.flashAt = now;
   }
 
-  burst(x: number, y: number, color: number, now: number): void {
-    for (let i = 0; i < 16; i++) {
-      const a = (i / 16) * Math.PI * 2 + Math.random() * 0.5;
-      const speed = 10 + Math.random() * 26;
+  /** Two beams cancelling throw sparks where they meet. */
+  sparks(x: number, y: number, now: number): void {
+    for (let i = 0; i < 26; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const speed = 14 + Math.random() * 34;
       this.particles.push({
         x,
         y,
         vx: Math.cos(a) * speed,
         vy: Math.sin(a) * speed,
         born: now,
-        ttl: 300 + Math.random() * 280,
-        color,
+        ttl: 220 + Math.random() * 320,
+        color: i % 3 === 0 ? AMBER : PALE,
       });
     }
-    this.shake = Math.max(this.shake, 1.6);
+    this.shake = Math.max(this.shake, 1.4);
   }
 
-  mark(player: SnapshotPlayer, fighter: Fighter, now: number): void {
+  /** A death: the killer's finisher goes off, and a ghost marks the spot. */
+  eliminate(
+    resolution: Resolution,
+    victim: SnapshotPlayer,
+    players: readonly SnapshotPlayer[],
+    roster: Map<string, Fighter>,
+    now: number,
+  ): void {
+    const fighter = roster.get(victim.id);
+    if (!fighter) return;
+    const shake = this.spawnFinisher(this.finishers, resolution, victim, players, roster, now);
+    this.shake = Math.max(this.shake, shake);
+    this.mark(victim, fighter, now);
+  }
+
+  crateBroken(crate: Crate, now: number): void {
+    this.obstacleFx.crateBroken(crate, now);
+    this.shake = Math.max(this.shake, 1.2);
+  }
+
+  teleported(from: { x: number; y: number }, to: { x: number; y: number }, color: number, now: number): void {
+    this.obstacleFx.teleported(from, to, color, now);
+  }
+
+  private drawObstacles(world: World, light: Lighting, now: number, layer: 'floor' | 'solid'): void {
+    if (layer === 'floor') drawFloorObstacles(this.view, world, light, now);
+    else drawSolidObstacles(this.view, world, light, now);
+  }
+
+  /** Freezes the picture on the current frame, the way a heavy hit lands. */
+  hitStop(now: number, ms: number): void {
+    this.holdUntil = now + ms;
+  }
+
+  announce(title: string, by: Fighter | null, now: number): void {
+    this.callout = { title, by: by?.name ?? null, color: by ? mix(by.color, PALE, 0.3) : PALE, born: now };
+  }
+
+  feedKill(killer: Fighter, victim: Fighter, now: number): void {
+    this.feed.unshift({ killer, victim, born: now });
+    this.feed.length = Math.min(this.feed.length, FEED_MAX);
+  }
+
+  /** The last two, face to face across the screen. */
+  showdown(a: Fighter, b: Fighter, now: number): void {
+    this.intro = { a, b, born: now };
+  }
+
+  private spawnFinisher(
+    into: Finishers,
+    resolution: Resolution,
+    victim: SnapshotPlayer,
+    players: readonly SnapshotPlayer[],
+    roster: Map<string, Fighter>,
+    now: number,
+  ): number {
+    const fighter = roster.get(victim.id);
+    if (!fighter) return 0;
+    const killerId = killerOf(resolution, victim.id);
+    const killer = killerId ? roster.get(killerId) : undefined;
+    const from = players.find((p) => p.id === killerId);
+    return into.spawn(
+      killer?.finisher ?? fighter.finisher,
+      {
+        x: victim.x,
+        y: victim.y,
+        aim: victim.aim,
+        color: fighter.color,
+        archetype: fighter.archetype,
+        from: from ? { x: from.x, y: from.y } : null,
+      },
+      killer?.color ?? fighter.color,
+      now,
+    );
+  }
+
+  private mark(player: SnapshotPlayer, fighter: Fighter, now: number): void {
     this.markers.push({
       x: player.x,
       y: player.y,
@@ -251,6 +435,14 @@ export class Renderer {
     this.flashAt = -1;
     this.shake = 0;
     this.impactedRound = -1;
+    this.finishers.clear();
+    this.replayFinishers.clear();
+    this.splats.clear();
+    this.obstacleFx.clear();
+    this.callout = null;
+    this.intro = null;
+    this.feed = [];
+    this.holdUntil = 0;
   }
 
   // ------------------------------------------------------------- geometry ---
@@ -309,6 +501,13 @@ export class Renderer {
   // --------------------------------------------------------------- drawing ---
 
   frame(scene: Scene, now: number): void {
+    // Hit-stop: the last frame stays up, so the killing hit lands as a still.
+    if (now < this.holdUntil) return;
+    if (scene.killcam) {
+      this.drawKillcam(scene, scene.killcam, now);
+      return;
+    }
+
     const buffer = this.buffer;
     const lit = scene.phase === 'lights' || !scene.inMatch;
     const ambient = lit ? 1 : ambientAt(now - scene.darkAt);
@@ -322,7 +521,10 @@ export class Renderer {
     if (lit) this.drawFacility(scene, size, now);
     else this.drawDarkFacility(scene, size, ambient);
 
+    const light: Lighting = { lit, ambient, lamp: lit ? null : scene.self };
+    if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'floor');
     this.drawScorches(scene, size, lit);
+    if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'solid');
 
     if (scene.inMatch) {
       if (lit) this.drawLitRound(scene, size, now);
@@ -330,12 +532,40 @@ export class Renderer {
       this.drawMarkers(now);
       this.drawImpacts(now);
       this.drawParticles(now);
+      this.obstacleFx.draw(this.view, now);
+      this.finishers.draw(this.view, now);
       this.drawFlash(now);
+      if (scene.showdown) this.drawEmergency(lit, now);
+    }
+
+    // The world shakes; the interface drawn after this stays put.
+    this.shift = this.shakeOffset(Math.round(this.shake));
+    buffer.camera(buffer.width / 2, buffer.height / 2, 1, this.shift.x, this.shift.y, VOID);
+
+    if (scene.inMatch) {
       this.drawHud(scene, now);
+      this.drawCallout(now);
+      this.drawIntro(now);
     }
 
     buffer.present(this.ctx, this.scale);
     if (scene.inMatch && lit) this.drawNameplates(scene, size);
+    if (scene.inMatch) this.drawFeed(now);
+  }
+
+  private shakeOffset(strength: number): { x: number; y: number } {
+    if (strength <= 0) return { x: 0, y: 0 };
+    const jitter = () => Math.round((Math.random() * 2 - 1) * strength);
+    return { x: jitter(), y: jitter() };
+  }
+
+  /**
+   * Emergency power: a slow red pulse over everything. Uniform, so in the
+   * dark it gives nothing away about where anyone is.
+   */
+  private drawEmergency(lit: boolean, now: number): void {
+    const pulse = 0.5 + 0.5 * Math.sin(now / 280);
+    this.buffer.tint(EMERGENCY, (lit ? 0.07 : 0.05) + pulse * 0.06);
   }
 
   private currentSize(scene: Scene, now: number): number {
@@ -602,20 +832,17 @@ export class Renderer {
       if (!settling && this.impactedRound !== lights.round) {
         this.impactedRound = lights.round;
         for (const beam of resolution.beams) {
-          const clipped = this.clipToWall(beam, size);
-          this.impacts.push({
-            x: clipped.ex,
-            y: clipped.ey,
-            color: scene.roster.get(beam.id)?.color ?? PALE,
-            born: now,
-          });
+          // Every bounce and the final stop leave a mark.
+          for (const seg of this.clipPath(beam.segments, size)) {
+            this.impacts.push({ x: seg.ex, y: seg.ey, color: scene.roster.get(beam.id)?.color ?? PALE, born: now });
+          }
         }
         this.shake = Math.max(this.shake, 1.1);
       }
 
       for (const beam of resolution.beams) {
         const color = scene.roster.get(beam.id)?.color ?? PALE;
-        this.drawBeam(this.clipToWall(beam, size), color, fade, now, grow, settling);
+        this.drawPath(this.clipPath(beam.segments, size), color, fade, now, easeOut(grow), settling);
       }
 
       for (const duel of resolution.duels) {
@@ -623,7 +850,7 @@ export class Renderer {
         const b = lights.players.find((p) => p.id === duel.b);
         if (!a || !b) continue;
         const pulse = 0.45 + 0.4 * Math.sin(elapsed / 60);
-        this.drawBeam({ ox: a.x, oy: a.y, ex: b.x, ey: b.y }, PALE, pulse, now, grow, settling);
+        this.drawBeam({ ox: a.x, oy: a.y, ex: b.x, ey: b.y }, PALE, pulse, now, easeOut(grow), settling);
       }
     }
 
@@ -638,7 +865,7 @@ export class Renderer {
         this.drawFighter(player, fighter, now, { walking: false });
         continue;
       }
-      const dying = clamp01((elapsed - RESOLVE_DELAY_MS) / DEATH_FADE_MS);
+      const dying = clamp01((elapsed - RESOLVE_DELAY_MS - HIT_STOP_MS) / DEATH_FADE_MS);
       if (dying >= 1) continue;
       this.drawFighter(player, fighter, now, {
         walking: false,
@@ -659,7 +886,7 @@ export class Renderer {
         mix(fighter.color, PALE, 0.5),
         0.1,
       );
-      this.drawBeam(this.traceFrom(scene.self, size), fighter.color, 0.95, now, 1, false);
+      this.drawPath(this.traceFrom(scene.self, scene.world), fighter.color, 0.95, now, 1, false);
       this.drawFighter({ ...scene.self, id: scene.selfId, alive: true }, fighter, now, {
         walking: this.moving,
       });
@@ -669,44 +896,75 @@ export class Renderer {
     for (const player of scene.watch) {
       const fighter = scene.roster.get(player.id);
       if (!fighter) continue;
-      this.drawBeam(this.traceFrom(player, size), fighter.color, 0.4, now, 1, false);
+      this.drawPath(this.traceFrom(player, scene.world), fighter.color, 0.4, now, 1, false);
       this.drawFighter(player, fighter, now, { walking: false, alpha: 0.8 });
     }
   }
 
-  private clipToWall(beam: Trace, size: number): Trace {
-    const dx = beam.ex - beam.ox;
-    const dy = beam.ey - beam.oy;
-    const length = Math.hypot(dx, dy);
-    if (length === 0) return beam;
-    const dir = { x: dx / length, y: dy / length };
-    const reach = Math.min(length, rayToWall({ x: beam.ox, y: beam.oy }, dir, size));
-    return { ox: beam.ox, oy: beam.oy, ex: beam.ox + dir.x * reach, ey: beam.oy + dir.y * reach };
+  /**
+   * Cuts a path off where the shrinking wall now stands. A beam is fired before
+   * the shrink, so once the wall has moved, anything past it is gone.
+   */
+  private clipPath(segments: readonly Trace[], size: number): Trace[] {
+    const kept: Trace[] = [];
+    for (const seg of segments) {
+      const dx = seg.ex - seg.ox;
+      const dy = seg.ey - seg.oy;
+      const length = Math.hypot(dx, dy);
+      if (length === 0) continue;
+      const dir = { x: dx / length, y: dy / length };
+      const reach = Math.min(length, rayToWall({ x: seg.ox, y: seg.oy }, dir, size));
+      kept.push({ ox: seg.ox, oy: seg.oy, ex: seg.ox + dir.x * reach, ey: seg.oy + dir.y * reach });
+      if (reach < length - 0.5) break;
+    }
+    return kept;
   }
 
-  private traceFrom(p: { x: number; y: number; aim: number }, size: number): Trace {
+  /** Where a fighter's beam would go right now, bounces and all. */
+  private traceFrom(p: { x: number; y: number; aim: number }, world: World): Trace[] {
     const dir = { x: Math.cos(p.aim), y: Math.sin(p.aim) };
     const origin = { x: p.x + dir.x * BARREL_LENGTH, y: p.y + dir.y * BARREL_LENGTH };
-    const length = rayToWall(origin, dir, size);
-    return { ox: origin.x, oy: origin.y, ex: origin.x + dir.x * length, ey: origin.y + dir.y * length };
+    return traceBeam(origin, dir, world).segments;
+  }
+
+  /** A whole beam, growing along its bounces: `reach` is how far along the full path, 0..1. */
+  private drawPath(
+    segments: readonly Trace[],
+    color: number,
+    alpha: number,
+    now: number,
+    reach: number,
+    settling: boolean,
+  ): void {
+    const lengths = segments.map((seg) => Math.hypot(seg.ex - seg.ox, seg.ey - seg.oy));
+    let budget = lengths.reduce((sum, l) => sum + l, 0) * reach;
+    segments.forEach((seg, i) => {
+      if (budget <= 0) return;
+      const length = lengths[i]!;
+      this.drawBeam(seg, color, alpha, now, length === 0 ? 1 : clamp01(budget / length), settling, i === 0);
+      budget -= length;
+    });
   }
 
   /**
    * The beam is walked pixel by pixel rather than stroked, so energy can visibly
    * travel along it and so it can grow out of the muzzle when the lights return.
+   * `reach` is the share of this segment drawn so far; only the first segment
+   * leaves the muzzle, the rest start where a mirror sent them.
    */
   private drawBeam(
     beam: Trace,
     color: number,
     alpha: number,
     now: number,
-    grow: number,
+    reach: number,
     settling: boolean,
+    muzzle = true,
   ): void {
     if (alpha <= 0) return;
     const buffer = this.buffer;
     const x0 = this.px(beam.ox);
-    const y0 = this.py(beam.oy) - MUZZLE_LIFT;
+    const y0 = this.py(beam.oy) - (muzzle ? MUZZLE_LIFT : 0);
     const x1 = this.px(beam.ex);
     const y1 = this.py(beam.ey);
 
@@ -715,7 +973,7 @@ export class Renderer {
     const span = Math.hypot(dx, dy);
     if (span < 1) return;
 
-    const steps = Math.round(span * easeOut(grow));
+    const steps = Math.round(span * reach);
     const ux = dx / span;
     const uy = dy / span;
     const nx = -uy;
@@ -738,7 +996,7 @@ export class Renderer {
       }
     }
 
-    buffer.glow(x0, y0, 4, color, alpha * 0.55 * flicker);
+    buffer.glow(x0, y0, muzzle ? 4 : 2, color, alpha * 0.55 * flicker);
     buffer.blend(x0, y0, mix(color, PALE, 0.8), alpha * flicker);
   }
 
@@ -982,10 +1240,323 @@ export class Renderer {
       ctx.fillStyle = shown.id === scene.selfId ? '#ccd6e2' : 'rgba(121,132,154,0.75)';
       ctx.fillText(
         fighter.name.slice(0, 10).toUpperCase(),
-        this.px(player.x) * this.scale,
-        (this.py(player.y) - 15) * this.scale,
+        (this.px(player.x) + this.shift.x) * this.scale,
+        (this.py(player.y) - 15 + this.shift.y) * this.scale,
       );
     }
     ctx.letterSpacing = '0px';
+  }
+
+  /** Who took out whom, top right. Interface, so crisp text like the nameplates. */
+  private drawFeed(now: number): void {
+    this.feed = this.feed.filter((entry) => now - entry.born < FEED_MS);
+    if (this.feed.length === 0) return;
+
+    const ctx = this.ctx;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    ctx.font = `${Math.round(9 * dpr)}px ui-monospace, Menlo, Consolas, monospace`;
+    ctx.textAlign = 'right';
+    ctx.letterSpacing = `${Math.round(dpr)}px`;
+    const right = this.canvas.width - 10 * dpr;
+
+    this.feed.forEach((entry, i) => {
+      const y = (18 + i * 13) * dpr;
+      const victim = entry.victim.name.slice(0, 10).toUpperCase();
+      const arrow = ' > ';
+      ctx.globalAlpha = clamp01((FEED_MS - (now - entry.born)) / 600);
+      ctx.fillStyle = hex(entry.victim.color);
+      ctx.fillText(victim, right, y);
+      const victimW = ctx.measureText(victim).width;
+      ctx.fillStyle = hex(INK);
+      ctx.fillText(arrow, right - victimW, y);
+      const arrowW = ctx.measureText(arrow).width;
+      ctx.fillStyle = hex(entry.killer.color);
+      ctx.fillText(entry.killer.name.slice(0, 10).toUpperCase(), right - victimW - arrowW, y);
+    });
+    ctx.globalAlpha = 1;
+    ctx.letterSpacing = '0px';
+  }
+
+  /** The round's banner: slams in one size up, then settles and fades. */
+  private drawCallout(now: number): void {
+    const callout = this.callout;
+    if (!callout) return;
+    const age = now - callout.born;
+    if (age > CALLOUT_MS) {
+      this.callout = null;
+      return;
+    }
+    const alpha = clamp01((CALLOUT_MS - age) / 220);
+    const y = Math.round(this.buffer.height * 0.27);
+    const scale = this.shout(callout.title, y, age < 80 ? 4 : 3, callout.color, alpha);
+    if (callout.by) this.shout(callout.by.toUpperCase(), y + 6 * scale + 2, 1, PALE, alpha * 0.85);
+  }
+
+  /**
+   * Centred pixel text with a hard drop shadow, so it reads over any floor.
+   * Steps down a size when the screen is too narrow; returns the size used.
+   */
+  private shout(text: string, y: number, scale: number, color: number, alpha: number): number {
+    const buffer = this.buffer;
+    const fit = Math.max(1, Math.min(scale, Math.floor((buffer.width - 8) / buffer.textWidth(text, 1))));
+    const x = Math.round(buffer.width / 2 - buffer.textWidth(text, fit) / 2);
+    buffer.text(text, x + 1, y + 1, 0x000000, alpha * 0.7, fit);
+    buffer.text(text, x, y, color, alpha, fit);
+    return fit;
+  }
+
+  /** "VS": both fighters slide in at triple size on a dark band. */
+  private drawIntro(now: number): void {
+    const intro = this.intro;
+    if (!intro) return;
+    const age = now - intro.born;
+    if (age > INTRO_MS) {
+      this.intro = null;
+      return;
+    }
+
+    const buffer = this.buffer;
+    const fade = clamp01((INTRO_MS - age) / 250);
+    const slide = easeOut(clamp01(age / 240));
+    const s = 3;
+    const w = SPRITE_W * s;
+    const h = SPRITE_H * s;
+    const cx = Math.round(buffer.width / 2);
+    const top = Math.round(buffer.height / 2 - h / 2);
+
+    buffer.rect(0, top - 14, buffer.width, h + 30, 0x000000, 0.62 * fade);
+    const leftX = Math.round(lerp(-w, cx - w - 12, slide));
+    const rightX = Math.round(lerp(buffer.width, cx + 12, slide));
+    this.blitScaled(sprite('side', 0, intro.a.archetype, intro.a.color), leftX, top, s, false, fade);
+    this.blitScaled(sprite('side', 0, intro.b.archetype, intro.b.color), rightX, top, s, true, fade);
+
+    this.shout('SHOWDOWN', top - 10, 1, AMBER, fade);
+    if (age > 180) this.shout('VS', top + h / 2 - 8, age < 260 ? 4 : 3, PALE, fade);
+    const name = (fighter: Fighter, x: number) => {
+      const label = fighter.name.slice(0, 10).toUpperCase();
+      const left = Math.round(x + w / 2 - buffer.textWidth(label) / 2);
+      buffer.text(label, left, top + h + 4, mix(fighter.color, PALE, 0.4), fade);
+    };
+    name(intro.a, leftX);
+    name(intro.b, rightX);
+  }
+
+  private blitScaled(art: Sprite, left: number, top: number, scale: number, flip: boolean, alpha: number): void {
+    for (let y = 0; y < art.height; y++) {
+      for (let x = 0; x < art.width; x++) {
+        const color = art.pixels[y * art.width + (flip ? art.width - 1 - x : x)]!;
+        if (color >= 0) this.buffer.rect(left + x * scale, top + y * scale, scale, scale, color, alpha);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------- killcam ---
+
+  /**
+   * The match-ending round, replayed: the final blackout at speed with every
+   * path on show, the snap in slow motion, a freeze on the hit, the anime
+   * cut-in, the finisher played out in full at half speed, and the winner's card.
+   */
+  private drawKillcam(scene: Scene, kc: Killcam, now: number): void {
+    const buffer = this.buffer;
+    const t = now - kc.startedAt;
+    const { beat, p, start } = beatAt(t);
+    if (beat === 'cutin') {
+      this.drawCutIn(scene, kc, t - start);
+      buffer.present(this.ctx, this.scale);
+      return;
+    }
+
+    const frames = (kc.frames ??= this.killcamFrames(kc));
+    const size = kc.lights.size;
+    const dark = beat === 'intro' || beat === 'replay';
+    const after = beat === 'boom' || beat === 'finale';
+    // Crates broken by the final shot only give way once the finisher goes off.
+    const world = after ? scene.world : kc.world;
+
+    // The replay is "night vision": the real room under a dark wash, so the
+    // paths read against floor the players could not see at the time.
+    buffer.clear(VOID);
+    this.drawDeadZone(true, 1);
+    this.drawFacility(scene, size, now);
+    this.drawObstacles(world, { lit: true, ambient: 1, lamp: null }, now, 'floor');
+    this.drawObstacles(world, { lit: true, ambient: 1, lamp: null }, now, 'solid');
+    if (dark) buffer.rect(0, 0, buffer.width, buffer.height, NIGHT, 0.62);
+
+    if (dark) this.drawReplay(scene, kc, beat === 'replay' ? p : 0, now);
+    else this.drawFinalShot(scene, kc, beat, p, now);
+    if (after) this.drawReplayBoom(scene, kc, kc.startedAt + BOOM_AT + (t - BOOM_AT) * KILLCAM_SLOWMO);
+    if (beat === 'freeze') buffer.tint(PALE, (1 - p) * 0.45);
+
+    const frame = this.killcamFraming(frames, beat, p);
+    const kick = beat === 'freeze' || (beat === 'boom' && p < 0.12) ? this.shakeOffset(2) : { x: 0, y: 0 };
+    buffer.camera(this.px(frame.x), this.py(frame.y), frame.zoom, kick.x, kick.y, VOID);
+
+    this.drawKillcamOverlay(beat, p, now - kc.startedAt, now);
+    if (beat === 'finale') this.drawFinaleCard(scene, kc, t - start);
+    buffer.present(this.ctx, this.scale);
+  }
+
+  /** Who the cut-in is about: the winner's victim if there is a winner, else the first to fall. */
+  private killcamCast(scene: Scene, kc: Killcam): { killer: Portrait | null; victim: Portrait | null; caption: string } {
+    const resolution = kc.lights.resolution;
+    const winner = kc.lights.players.find((p) => p.alive)?.id ?? null;
+    const kill = resolution?.kills.find((k) => k.shooter === winner) ?? resolution?.kills[0];
+    const victimId = kill?.target ?? resolution?.eliminated[0] ?? null;
+    const portrait = (id: string | null | undefined): Portrait | null => {
+      const fighter = id ? scene.roster.get(id) : undefined;
+      return fighter ? { name: fighter.name, color: fighter.color, archetype: fighter.archetype } : null;
+    };
+    if (kill && kill.shooter === kill.target) return { killer: null, victim: portrait(victimId), caption: 'OOPS!' };
+    if (!winner) return { killer: null, victim: portrait(victimId), caption: 'DOUBLE KO!' };
+    return { killer: portrait(kill?.shooter), victim: portrait(victimId), caption: 'EXECUTED!' };
+  }
+
+  private drawCutIn(scene: Scene, kc: Killcam, t: number): void {
+    const cast = this.killcamCast(scene, kc);
+    if (!cast.victim) return;
+    drawKillscreen(this.buffer, cast.killer, cast.victim, cast.caption, t);
+  }
+
+  private drawFinaleCard(scene: Scene, kc: Killcam, t: number): void {
+    const winnerId = kc.lights.players.find((p) => p.alive)?.id;
+    const fighter = winnerId ? scene.roster.get(winnerId) : undefined;
+    const winner = fighter ? { name: fighter.name, color: fighter.color, archetype: fighter.archetype } : null;
+    // A 3-pixel W reads as an H at banner size, so the card says VICTORY. With
+    // nobody left it already says DRAW, and the title becomes its sub-label.
+    drawFinale(this.buffer, winner, winner ? 'VICTORY' : 'NO SURVIVORS', t);
+  }
+
+  /** Everyone's path through the dark, with their aim, as it happened. */
+  private drawReplay(scene: Scene, kc: Killcam, u: number, now: number): void {
+    for (const track of kc.lights.replay ?? []) {
+      const fighter = scene.roster.get(track.id);
+      if (!fighter) continue;
+      this.drawTrail(track, fighter.color, u);
+      const pose = poseAt(track, u);
+      const before = poseAt(track, u - 0.03);
+      const walking = Math.hypot(pose.x - before.x, pose.y - before.y) > 4;
+      this.drawPath(this.traceFrom(pose, kc.world), fighter.color, 0.35, now, 1, false);
+      this.drawFighter({ ...pose, id: track.id, alive: true }, fighter, now, { walking, rim: 0.5 });
+    }
+  }
+
+  /** Where a fighter went in the dark, traced at their feet and fading with age. */
+  private drawTrail(track: ReplayTrack, color: number, u: number): void {
+    const points = track.points;
+    const upto = Math.floor(u * (points.length - 1));
+    for (let i = 1; i <= upto; i++) {
+      const [x0, y0] = points[i - 1]!;
+      const [x1, y1] = points[i]!;
+      const fresh = 0.3 + 0.6 * (i / upto);
+      this.buffer.line(
+        this.px(x0), this.py(y0) + SPRITE_FOOT,
+        this.px(x1), this.py(y1) + SPRITE_FOOT,
+        color, fresh, true,
+      );
+    }
+  }
+
+  /** The snap, slowed right down: beams crawl out of the muzzles and land. */
+  private drawFinalShot(scene: Scene, kc: Killcam, beat: KillcamBeat, p: number, now: number): void {
+    const lights = kc.lights;
+    const victims = new Set(lights.resolution?.eliminated ?? []);
+    const grow = beat === 'shot' ? p : 1;
+    const alpha = beat === 'boom' ? 1 - clamp01(p * 3) : beat === 'finale' ? 0 : 1;
+
+    for (const beam of lights.resolution?.beams ?? []) {
+      const color = scene.roster.get(beam.id)?.color ?? PALE;
+      this.drawPath(this.clipPath(beam.segments, lights.size), color, alpha, now, grow, beat === 'shot');
+    }
+
+    for (const player of lights.players) {
+      const fighter = scene.roster.get(player.id);
+      if (!fighter) continue;
+      if (!victims.has(player.id)) {
+        this.drawFighter(player, fighter, now, { walking: false });
+        continue;
+      }
+      // The finisher owns the body from the moment it goes off.
+      if (beat === 'boom' || beat === 'finale') continue;
+      this.drawFighter(player, fighter, now, { walking: false, whiten: beat === 'freeze' ? 1 : 0 });
+    }
+  }
+
+  private drawReplayBoom(scene: Scene, kc: Killcam, slow: number): void {
+    const { resolution, players } = kc.lights;
+    if (!kc.spawned && resolution) {
+      kc.spawned = true;
+      for (const id of resolution.eliminated) {
+        const victim = players.find((p) => p.id === id);
+        if (!victim) continue;
+        this.spawnFinisher(this.replayFinishers, resolution, victim, players, scene.roster, slow);
+        this.splats.spawn(victim.x, victim.y, slow);
+      }
+    }
+    this.splats.draw(this.view, slow);
+    this.replayFinishers.draw(this.view, slow);
+  }
+
+  /**
+   * Wide on the whole chase, cut in on the shooters as the snap lands, punch
+   * in on the hit, then ease back so the winner is in shot for the finale.
+   */
+  private killcamFrames(kc: Killcam): KillcamFrames {
+    const viewW = this.buffer.width * UNITS_PER_PX;
+    const viewH = this.buffer.height * UNITS_PER_PX * (1 - LETTERBOX * 2);
+    const { players, replay, resolution } = kc.lights;
+    const victims = new Set(resolution?.eliminated ?? []);
+    const involved = new Set([...victims, ...(resolution?.kills.map((k) => k.shooter) ?? [])]);
+
+    const paths = (replay ?? []).flatMap((track) => track.points.map(([x, y]) => ({ x, y })));
+    const finals = players.filter((p) => involved.has(p.id));
+    const wide = frameAround(paths.length > 0 ? paths : players, viewW, viewH, 2);
+    const tight = frameAround(finals.length > 0 ? finals : players, viewW, viewH, 3);
+    const punch = frameAround(players.filter((p) => victims.has(p.id)), viewW, viewH, 4, 90);
+    // Whole zoom steps keep every pixel the same size once the camera settles.
+    const settle = (f: Framing): Framing => ({ ...f, zoom: Math.max(1, Math.floor(f.zoom)) });
+    return {
+      wide: settle(wide),
+      tight: settle(tight),
+      punch: settle({ ...punch, zoom: Math.max(punch.zoom, tight.zoom + 1) }),
+    };
+  }
+
+  private killcamFraming(f: KillcamFrames, beat: KillcamBeat, p: number): Framing {
+    switch (beat) {
+      case 'intro':
+      case 'replay':
+        return f.wide;
+      case 'shot':
+        return between(f.wide, f.tight, easeInOut(clamp01(p * 2)));
+      case 'freeze':
+      case 'cutin':
+        return f.punch;
+      case 'boom':
+        return between(f.punch, f.tight, easeOut(clamp01((p - 0.55) / 0.45)));
+      case 'finale':
+        return f.tight;
+    }
+  }
+
+  /** Letterbox, scanlines and labels: the interface layer, never zoomed. */
+  private drawKillcamOverlay(beat: KillcamBeat, p: number, t: number, now: number): void {
+    const buffer = this.buffer;
+    if (beat === 'intro' || beat === 'replay') {
+      for (let y = 0; y < buffer.height; y += 2) buffer.rect(0, y, buffer.width, 1, 0x000000, 0.2);
+    }
+
+    // The bars open up for the finale card.
+    const open = beat === 'finale' ? 1 - easeOut(clamp01(p * 4)) : 1;
+    const bar = Math.round(buffer.height * LETTERBOX * easeOut(clamp01(t / 300)) * open);
+    buffer.rect(0, 0, buffer.width, bar, 0x000000, 1);
+    buffer.rect(0, buffer.height - bar, buffer.width, bar, 0x000000, 1);
+    if (bar < 9) return;
+
+    const labelY = Math.round(bar / 2 - 2);
+    if (Math.floor(now / 400) % 2 === 0) buffer.rect(7, labelY + 1, 3, 3, KILLCAM_RED, 1);
+    buffer.text('KILLCAM', 13, labelY, PALE, 0.9);
+    const speed = SPEED_LABEL[beat];
+    buffer.text(speed, buffer.width - 7 - buffer.textWidth(speed), labelY, AMBER, 0.9);
   }
 }
