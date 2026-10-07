@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inradius } from '../shared/arena.js';
-import { BARREL_LENGTH, KILLCAM_MS, PLAYER_RADIUS, TICK_MS } from '../shared/constants.js';
+import { BARREL_LENGTH, KILLCAM_MS, PLAYER_RADIUS, STALL_ROUNDS, TICK_MS } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { layoutFor, type MapId } from '../shared/maps.js';
 import { Match } from './match.js';
@@ -245,6 +245,21 @@ describe('Match', () => {
     expect(first).toMatchObject({ id: 'a', kills: 1, killedBy: null });
     expect(first!.longest).toBeGreaterThan(300);
     expect(second).toMatchObject({ id: 'b', kills: 0, longest: 0, killedBy: 'a' });
+  });
+
+  it('cuts power to all cover when the last two stall, but keeps floor machinery', () => {
+    const pillars = new Match(ROSTER, (msg) => sent.push(msg), clock, 'pillars');
+    match = pillars;
+    sent.length = 0;
+    // Both spawns face the centre and cancel each other: a stall every round.
+    for (let round = 1; round < STALL_ROUNDS; round++) {
+      runUntil('dark');
+      expect(runUntil('lights').broken).toEqual([]);
+    }
+    runUntil('dark');
+    const cut = runUntil('lights').broken;
+    expect(cut.length).toBeGreaterThan(0);
+    expect(cut.every((id) => id.startsWith('pillar'))).toBe(true);
   });
 
   it('keeps a dropped player on the field as a frozen target', () => {
