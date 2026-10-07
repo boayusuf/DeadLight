@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { inradius } from '../shared/arena.js';
-import { BARREL_LENGTH, PLAYER_RADIUS, TICK_MS } from '../shared/constants.js';
+import { BARREL_LENGTH, KILLCAM_MS, PLAYER_RADIUS, TICK_MS } from '../shared/constants.js';
 import type { LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { Match } from './match.js';
 
 const ROSTER: LobbyPlayer[] = [
-  { id: 'a', name: 'A', color: '#ff0000', ready: true },
-  { id: 'b', name: 'B', color: '#00ff00', ready: true },
+  { id: 'a', name: 'A', color: '#ff0000', ready: true, finisher: 'shatter', wins: 0 },
+  { id: 'b', name: 'B', color: '#00ff00', ready: true, finisher: 'storm', wins: 0 },
 ];
 
 describe('Match', () => {
@@ -188,6 +188,62 @@ describe('Match', () => {
     match.input('a', 1, 0, 0, aimAt(a, b));
 
     expect(runUntil('lights').resolution!.eliminated).toEqual(['b']);
+  });
+
+  /** Plays the first round out as a duel, then has `a` shoot `b` while `b` looks away. */
+  function finishWithAKill(): Extract<ServerMessage, { t: 'lights' }> {
+    runUntil('dark');
+    runUntil('lights');
+    const a = find('a');
+    const b = find('b');
+    runUntil('dark');
+    match.input('a', 0, 0, 0, aimAt(a, b));
+    match.input('b', 0, 0, 0, aimAt(b, a) + Math.PI / 2);
+    return runUntil('lights');
+  }
+
+  it('sends the final blackout as a replay only with the round that ends the match', () => {
+    runUntil('dark');
+    expect(runUntil('lights').replay).toBeUndefined();
+
+    // Walking straight at the target keeps the aim on it while the path grows.
+    const a = find('a');
+    const b = find('b');
+    const aim = aimAt(a, b);
+    runUntil('dark');
+    match.input('a', 0, Math.cos(aim), Math.sin(aim), aim);
+    match.input('b', 0, 0, 0, aimAt(b, a) + Math.PI / 2);
+    advance(500);
+    match.input('a', 1, 0, 0, aim);
+    const final = runUntil('lights');
+
+    expect(final.remaining).toBe(1);
+    const tracks = final.replay!;
+    expect(tracks.map((t) => t.id).sort()).toEqual(['a', 'b']);
+    const path = tracks.find((t) => t.id === 'a')!.points;
+    expect(path.length).toBeGreaterThan(20);
+    // Starts where the blackout began and ends where the shot was fired from.
+    const fired = final.players.find((p) => p.id === 'a')!;
+    expect(path[0]![0]).toBeCloseTo(a.x, 0);
+    expect(path.at(-1)![0]).toBeCloseTo(fired.x, 0);
+    expect(path.at(-1)![1]).toBeCloseTo(fired.y, 0);
+    expect(Math.hypot(fired.x - a.x, fired.y - a.y)).toBeGreaterThan(150);
+  });
+
+  it('holds the final lights long enough for the killcam', () => {
+    const final = finishWithAKill();
+    expect(final.remaining).toBe(1);
+    expect(final.replay).toBeDefined();
+    expect(final.holdMs).toBe(KILLCAM_MS);
+  });
+
+  it('reports kills, the longest shot and who took each player out', () => {
+    finishWithAKill();
+    const over = runUntil('over');
+    const [first, second] = over.standings;
+    expect(first).toMatchObject({ id: 'a', kills: 1, killedBy: null });
+    expect(first!.longest).toBeGreaterThan(300);
+    expect(second).toMatchObject({ id: 'b', kills: 0, longest: 0, killedBy: 'a' });
   });
 
   it('keeps a dropped player on the field as a frozen target', () => {

@@ -97,3 +97,30 @@ export const PLAYER_COLORS = [
 ] as const;
 
 export const SIGHT_RADIUS = 115;
+
+/**
+ * Death effects, picked in the lobby. The killer's pick plays on everyone they
+ * take out, so a kill carries a signature.
+ */
+export const FINISHERS = ['shatter', 'supernova', 'glitch', 'ash', 'singularity', 'storm'] as const;
+export type FinisherId = (typeof FINISHERS)[number];
+export const DEFAULT_FINISHER: FinisherId = 'shatter';
+export const FINISHER_NAMES: Record<FinisherId, string> = {
+  shatter: 'Shatter',
+  supernova: 'Supernova',
+  glitch: 'Glitch',
+  ash: 'Ash',
+  singularity: 'Black hole',
+  storm: 'Storm',
+};
+
+export const isFinisher = (value: unknown): value is FinisherId =>
+  (FINISHERS as readonly unknown[]).includes(value);
+
+/**
+ * The match-ending round is revealed as a killcam instead of the usual
+ * lights-on beat, so the server holds the final lights this long.
+ */
+export const KILLCAM_MS = 4200;
+/** Samples per second of each fighter's path, kept for the killcam replay. */
+export const REPLAY_HZ = 15;

@@ -359,6 +359,25 @@ li.winner .tag {
   color: var(--amber);
 }
 
+/* Kills and wins, between the name and the tag. */
+li .stat {
+  margin-left: auto;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--ink);
+}
+
+li .stat + .tag {
+  margin-left: 0;
+  min-width: 3.4em;
+  text-align: right;
+}
+
+li .wins {
+  color: var(--amber);
+  font-size: 9px;
+}
+
 /* --- Fighter picker ------------------------------------------------- */
 
 .roster {
@@ -398,6 +417,40 @@ li.winner .tag {
   cursor: default;
 }
 
+/* --- Finisher picker ---------------------------------------------- */
+
+.finishers {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 8px;
+}
+
+#finisher-preview {
+  width: 76px;
+  height: 76px;
+  image-rendering: pixelated;
+  background: var(--void);
+  border: 1px solid var(--metal);
+}
+
+.finisher-picks {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+
+.finisher-picks .key {
+  padding: 4px 2px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.finisher-picks .key.mine {
+  color: var(--void);
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
 /* --- Result ---------------------------------------------------------- */
 
 #panel-result {
@@ -428,4 +481,14 @@ li.winner .tag {
   image-rendering: pixelated;
   width: 56px;
   height: 80px;
+}
+
+.stats {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--pale);
+}
+
+.stats:empty {
+  display: none;
 }

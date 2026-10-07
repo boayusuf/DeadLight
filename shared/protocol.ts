@@ -1,3 +1,4 @@
+import type { FinisherId } from './constants.js';
 import type { Resolution } from './resolve.js';
 
 export interface LobbyPlayer {
@@ -5,12 +6,25 @@ export interface LobbyPlayer {
   name: string;
   color: string;
   ready: boolean;
+  finisher: FinisherId;
+  /** Matches won in this room, kept across rematches. */
+  wins: number;
 }
 
 /** Final placement, best first. */
 export interface Standing {
   id: string;
   roundsSurvived: number;
+  kills: number;
+  /** Distance of this player's farthest kill, in world units; 0 without a kill. */
+  longest: number;
+  killedBy: string | null;
+}
+
+/** One fighter's path through a blackout: x, y and aim at REPLAY_HZ. */
+export interface ReplayTrack {
+  id: string;
+  points: [number, number, number][];
 }
 
 export interface SnapshotPlayer {
@@ -22,13 +36,15 @@ export interface SnapshotPlayer {
 }
 
 export type ClientMessage =
-  | { t: 'join'; name: string; mode: 'public' }
-  | { t: 'join'; name: string; mode: 'create' }
-  | { t: 'join'; name: string; mode: 'code'; code: string }
+  | { t: 'join'; name: string; finisher?: string; mode: 'public' }
+  | { t: 'join'; name: string; finisher?: string; mode: 'create' }
+  | { t: 'join'; name: string; finisher?: string; mode: 'code'; code: string }
   | { t: 'start' }
   | { t: 'ready'; value: boolean }
   /** Pick a colour, and with it a fighter. Refused if someone else has it. */
   | { t: 'color'; color: string }
+  /** Pick the death effect your kills will carry. */
+  | { t: 'finisher'; finisher: string }
   /** `seq` numbers each input so the server can say which ones it has applied. */
   | { t: 'input'; seq: number; mx: number; my: number; aim: number; x?: number; y?: number }
   | { t: 'again' };
@@ -51,6 +67,11 @@ export type ServerMessage
       resolution: Resolution | null;
       remaining: number;
       holdMs: number;
+      /**
+       * Only on the round that ends the match: every contender's path through
+       * the final blackout, for the killcam. Safe to send, the round is over.
+       */
+      replay?: ReplayTrack[];
     }
   /** Blackout begins, and how long it will last. */
   | { t: 'dark'; round: number; durationMs: number }
@@ -58,5 +79,6 @@ export type ServerMessage
   | { t: 'self'; x: number; y: number; seq: number }
   /** Eliminated players and late joiners watch the blackout in full light. */
   | { t: 'watch'; players: SnapshotPlayer[] }
-  | { t: 'over'; winner: string | null; rounds: number; standings: Standing[] }
+  /** `wins` is the room's running tally including this match, keyed by player id. */
+  | { t: 'over'; winner: string | null; rounds: number; standings: Standing[]; wins: Record<string, number> }
   | { t: 'err'; msg: string };
