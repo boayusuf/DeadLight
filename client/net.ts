@@ -7,6 +7,17 @@ function endpoint(): string {
   return `${scheme}://${location.host}/ws`;
 }
 
+/**
+ * A free server sleeps when nobody plays and takes a while to wake. Knocking
+ * as the page opens lets it boot while the player is still typing a name.
+ * Only the side effect matters, so a failed knock is ignored.
+ */
+export function wake(): void {
+  if (!import.meta.env.VITE_SERVER_URL) return;
+  const url = endpoint().replace(/^ws/, 'http').replace(/\/ws$/, '/');
+  fetch(url, { mode: 'no-cors' }).catch(() => undefined);
+}
+
 export class Net {
   private socket: WebSocket | null = null;
 
