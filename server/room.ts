@@ -88,6 +88,8 @@ export class Room {
   private playing: GameMode = 'classic';
   /** Set between games: the next one starts once the result card has had its beat. */
   private nextGameAt: number | null = null;
+  /** Whether someone has picked the game, which stops matchmaking rotating it. */
+  private chosen = false;
 
   private hostId: string | null = null;
   private countdownEndsAt: number | null = null;
@@ -169,7 +171,10 @@ export class Room {
    * game it belongs to, so one button does the obvious thing.
    */
   setMode(requester: string, mode: unknown): void {
-    if (requester !== this.hostId || this.match || this.isPublic) return;
+    if (this.match) return;
+    // A party's host decides; in a queue, whoever is waiting may change it.
+    if (!this.isPublic && requester !== this.hostId) return;
+    if (!this.members.some((m) => m.id === requester)) return;
     if (isModeId(mode)) {
       this.darkMode = mode;
       this.game = 'deadlight';
@@ -178,6 +183,8 @@ export class Room {
     } else {
       return;
     }
+    // A queue that has been given a game stops rotating through them.
+    this.chosen = true;
     this.sendLobby();
   }
 
@@ -465,7 +472,7 @@ export class Room {
     this.nextGameAt = null;
     for (const m of this.members) m.ready = m.bot;
     this.countdownEndsAt = null;
-    if (this.isPublic) this.rotateMode();
+    if (this.isPublic && !this.chosen) this.rotateMode();
     this.sendLobby();
   }
 
@@ -502,7 +509,8 @@ export class Room {
           players,
           countdownMs,
           map: this.map,
-          gameMode: this.game === 'deadlight' ? this.darkMode : this.playing,
+          // What the room is set to, not what it last played.
+          gameMode: this.game === 'deadlight' || this.game === 'mix' ? this.darkMode : this.game,
           game: this.game,
           darkMode: this.darkMode,
           session: { ...this.session, games: [...this.session.games] },

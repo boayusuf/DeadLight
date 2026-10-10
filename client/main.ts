@@ -97,7 +97,6 @@ const dom = {
   btnMusic: el<HTMLButtonElement>('btn-music'),
   modeName: el('mode-name'),
   modeBlurb: el('mode-blurb'),
-  modePicks: el('lobby-modes'),
   modeSection: el('mode-section'),
   gamePicks: el('game-picks'),
   gameBlurb: el('game-blurb'),
@@ -477,9 +476,11 @@ function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
   dom.modeBlurb.classList.toggle('warn', short);
   dom.modeSection.hidden = false;
   dom.modeName.textContent = name;
+  // A party's host decides; in a queue, anyone waiting may change it.
+  const mayPick = party ? host : true;
   for (const pick of gamePicks) {
     pick.button.classList.toggle('mine', pick.game === game);
-    pick.button.disabled = !host || !party;
+    pick.button.disabled = !mayPick;
   }
   for (const card of gameCards) card.button.classList.toggle('mine', card.game === game);
 
@@ -499,6 +500,7 @@ function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
     pick.button.classList.toggle('mine', session.games.includes(pick.game));
     pick.button.disabled = !host || !party;
   }
+  // Picking from the menu card also works once in a lobby.
 
   // The lit games ignore the arena, so the picker goes away with them.
   dom.mapSection.hidden = game !== 'mix' && isMiniGameId(game);

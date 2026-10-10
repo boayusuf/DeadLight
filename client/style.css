@@ -249,7 +249,7 @@ h1 span {
   gap:8px}
 .games {
   display:grid;
-  grid-template-columns:repeat(4,1fr);
+  grid-template-columns:repeat(5,1fr);
   gap:6px}
 .game,.key.mode {
   display:flex;
@@ -575,7 +575,7 @@ li .kick:hover {
   display:grid;
   gap:6px}
 .map-picks.modes {
-  grid-template-columns:repeat(4,1fr)}
+  grid-template-columns:repeat(5,1fr)}
 .map-picks.toggles,.map-picks.maps {
   grid-template-columns:repeat(3,1fr)}
 #vote-section,#vote-mix,#map-section {
