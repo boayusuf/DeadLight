@@ -1,0 +1,29 @@
+# Render's free tier puts a service to sleep after 15 minutes without traffic,
+# and a sleeping server takes the best part of a minute to answer the first
+# join. This knocks on the door often enough that it never gets there.
+#
+# GitHub turns scheduled workflows off after 60 days without a push to the
+# repository; a single commit turns them back on.
+name: keepalive
+
+on:
+  schedule:
+    # Every five minutes. GitHub runs these late when it is busy, so the gap is
+    # set well inside Render's fifteen.
+    - cron: '*/5 * * * *'
+  # So it can also be run by hand from the Actions tab.
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake the game server
+        run: |
+          curl --fail --silent --show-error --location \
+               --max-time 90 --retry 3 --retry-all-errors \
+               --output /dev/null --write-out 'HTTP %{http_code} in %{time_total}s\n' \
+               https://deadlight.onrender.com/
