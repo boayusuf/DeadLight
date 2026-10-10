@@ -1,6 +1,7 @@
 import {
   DEFAULT_FINISHER,
   FINISHERS,
+  LIGHTS_ON_MS,
   LOBBY_COUNTDOWN_MS,
   MAX_PLAYERS,
   MIN_PLAYERS,
@@ -10,13 +11,21 @@ import {
 } from '../shared/constants.js';
 import { MAP_IDS, isMapChoice, type MapChoice, type MapId } from '../shared/maps.js';
 import {
+  GAME_IDS,
   GAME_MIN_PLAYERS,
+  isGameChoice,
   isMiniGameId,
+  type GameChoice,
   type GameMode,
   type MiniGameId,
 } from '../shared/games.js';
-import { MODE_IDS, MODE_MIN_PLAYERS, isModeId } from '../shared/modes.js';
-import type { BotDifficulty, LobbyPlayer, ServerMessage } from '../shared/protocol.js';
+import { MODE_IDS, MODE_MIN_PLAYERS, isModeId, type ModeId } from '../shared/modes.js';
+import type {
+  BotDifficulty,
+  LobbyPlayer,
+  ServerMessage,
+  SessionSetup,
+} from '../shared/protocol.js';
 import { BOT_NAMES, BotBrain } from './bots.js';
 import { CollapseMatch } from './collapse.js';
 import { FreezeMatch } from './freeze.js';
@@ -28,6 +37,16 @@ import { RoundMatch } from './rounds.js';
 import { SumoMatch } from './sumo.js';
 
 const DIFFICULTIES: readonly BotDifficulty[] = ['easy', 'normal', 'hard'];
+
+/** The get-ready beat before a game is live, long enough to read its card. */
+export const INTRO_MS = 2600;
+/** How long the standings hang between two games of a session. */
+const BETWEEN_GAMES_MS = 4200;
+/**
+ * The dark game opens with its own lights-on beat, so it only needs the rest
+ * of the intro added in front of it.
+ */
+const DARK_INTRO_LEAD = Math.max(0, INTRO_MS - LIGHTS_ON_MS);
 
 /**
  * Votes a matchmaking kick needs: most of the other people in the room, and
@@ -55,8 +74,20 @@ export class Room {
 
   /** The arena for the next match; matchmaking always rolls one. */
   map: MapChoice = 'random';
-  /** The mode for the next match. Hosts pick it; matchmaking takes each in turn. */
-  gameMode: GameMode = 'classic';
+  /** The game for the next match: one of the six, or 'mix' for a different one each time. */
+  game: GameChoice = 'deadlight';
+  /** Which mode the dark game is played in. */
+  darkMode: ModeId = 'classic';
+  /** How long a session runs, and what 'mix' draws from. */
+  session: SessionSetup = { runs: 1, count: 3, games: [...GAME_IDS] };
+
+  /** Game the session is on, and the run it is in, both one-based while playing. */
+  private gameIndex = 0;
+  private runIndex = 0;
+  /** The game this session's current match is actually playing. */
+  private playing: GameMode = 'classic';
+  /** Set between games: the next one starts once the result card has had its beat. */
+  private nextGameAt: number | null = null;
 
   private hostId: string | null = null;
   private countdownEndsAt: number | null = null;
@@ -125,16 +156,70 @@ export class Room {
     this.sendLobby();
   }
 
+  /**
+   * The game, 'mix', or a DeadLight mode. Picking a mode also picks the dark
+   * game it belongs to, so one button does the obvious thing.
+   */
   setMode(requester: string, mode: unknown): void {
     if (requester !== this.hostId || this.match || this.isPublic) return;
-    if (!isModeId(mode) && !isMiniGameId(mode)) return;
-    this.gameMode = mode;
+    if (isModeId(mode)) {
+      this.darkMode = mode;
+      this.game = 'deadlight';
+    } else if (isGameChoice(mode)) {
+      this.game = mode;
+    } else {
+      return;
+    }
     this.sendLobby();
   }
 
-  /** Whether the chosen mode can be played with everyone seated right now. */
+  /** Host only: runs, games per run, and the pool 'mix' draws from. */
+  setSession(requester: string, runs: unknown, count: unknown, games: unknown): void {
+    if (requester !== this.hostId || this.match || this.isPublic) return;
+    if (typeof runs === 'number' && Number.isFinite(runs)) {
+      this.session.runs = Math.max(1, Math.min(5, Math.round(runs)));
+    }
+    if (typeof count === 'number' && Number.isFinite(count)) {
+      this.session.count = Math.max(1, Math.min(9, Math.round(count)));
+    }
+    if (Array.isArray(games)) {
+      const pool = games.filter((g): g is GameChoice => isGameChoice(g) && g !== 'mix');
+      // A pool of nothing would have nothing to draw, so an empty pick is ignored.
+      if (pool.length > 0) this.session.games = pool;
+    }
+    this.sendLobby();
+  }
+
+  /** The mode a match would be played in right now. */
+  get gameMode(): GameMode {
+    return this.game === 'mix' ? this.drawGame() : this.game === 'deadlight' ? this.darkMode : this.game;
+  }
+
+  /** Games in one session: a run of picks, played through `runs` times. */
+  get sessionGames(): number {
+    return (this.game === 'mix' ? this.session.count : 1) * this.session.runs;
+  }
+
+  /** Whether the chosen game can be played with everyone seated right now. */
   get modeFits(): boolean {
-    return this.members.length >= minPlayersFor(this.gameMode);
+    const needed =
+      this.game === 'mix'
+        ? Math.min(
+            ...this.session.games
+              .filter((g) => g !== 'mix')
+              .map((g) => minPlayersFor(g === 'deadlight' ? this.darkMode : (g as GameMode))),
+          )
+        : minPlayersFor(this.gameMode);
+    return this.members.length >= needed;
+  }
+
+  /** One game from the pool, skipping any the room is too small for. */
+  private drawGame(): GameMode {
+    const fits = this.session.games
+      .map((g): GameMode => (g === 'deadlight' ? this.darkMode : (g as GameMode)))
+      .filter((g) => this.members.length >= minPlayersFor(g));
+    const pool = fits.length > 0 ? fits : (['classic'] as GameMode[]);
+    return pool[Math.floor(Math.random() * pool.length)]!;
   }
 
   setMap(requester: string, map: unknown): void {
@@ -262,10 +347,20 @@ export class Room {
       if (this.match.finished) {
         this.match = null;
         this.roster = null;
-        for (const m of this.members) m.ready = m.bot;
-        this.countdownEndsAt = null;
-        if (this.isPublic) this.rotateMode();
-        this.sendLobby();
+        if (this.gameIndex < this.sessionGames) {
+          // Another game in the session: the result card gets its beat first.
+          this.nextGameAt = now + BETWEEN_GAMES_MS;
+          return;
+        }
+        this.endSession();
+      }
+      return;
+    }
+
+    if (this.nextGameAt !== null) {
+      if (now >= this.nextGameAt) {
+        this.nextGameAt = null;
+        this.startMatch(now);
       }
       return;
     }
@@ -319,22 +414,57 @@ export class Room {
     const map: MapId =
       this.map === 'random' ? MAP_IDS[Math.floor(Math.random() * MAP_IDS.length)]! : this.map;
     // Matchmaking never strands a lobby on a game it is too small for.
-    const mode = lineup.length >= minPlayersFor(this.gameMode) ? this.gameMode : 'classic';
+    const picked = this.gameMode;
+    const mode = lineup.length >= minPlayersFor(picked) ? picked : 'classic';
+    this.playing = mode;
+
+    const perRun = this.game === 'mix' ? this.session.count : 1;
+    this.gameIndex++;
+    this.runIndex = Math.floor((this.gameIndex - 1) / perRun) + 1;
+    this.send({
+      t: 'session',
+      run: this.runIndex,
+      runs: this.session.runs,
+      game: ((this.gameIndex - 1) % perRun) + 1,
+      games: perRun,
+      next: mode,
+      startsInMs: INTRO_MS,
+    });
     const send = (msg: ServerMessage, to?: string) => {
       if (msg.t === 'match') this.roster = msg;
-      this.send(msg.t === 'over' ? { ...msg, wins: this.recordWin(msg.winner) } : msg, to);
+      this.send(
+        msg.t === 'over'
+          ? {
+              ...msg,
+              wins: this.recordWin(msg.winner),
+              sessionLeft: Math.max(0, this.sessionGames - this.gameIndex),
+            }
+          : msg,
+        to,
+      );
     };
     this.match = isMiniGameId(mode)
-      ? startMini(mode, lineup, send, now, map)
+      ? startMini(mode, lineup, send, now + INTRO_MS, map)
       : mode === 'classic'
-        ? new Match(lineup, send, now, map)
-        : new RoundMatch(lineup, send, now, map, mode);
+        ? new Match(lineup, send, now + DARK_INTRO_LEAD, map)
+        : new RoundMatch(lineup, send, now + DARK_INTRO_LEAD, map, mode);
   }
 
-  /** Matchmaking plays the modes in turn, so every queue gets some variety. */
+  /** The session is over: everyone back to the lobby, ready flags cleared. */
+  private endSession(): void {
+    this.gameIndex = 0;
+    this.runIndex = 0;
+    this.nextGameAt = null;
+    for (const m of this.members) m.ready = m.bot;
+    this.countdownEndsAt = null;
+    if (this.isPublic) this.rotateMode();
+    this.sendLobby();
+  }
+
+  /** Matchmaking plays the games in turn, so every queue gets some variety. */
   private rotateMode(): void {
-    const at = isModeId(this.gameMode) ? MODE_IDS.indexOf(this.gameMode) : -1;
-    this.gameMode = MODE_IDS[(at + 1) % MODE_IDS.length]!;
+    const at = MODE_IDS.indexOf(this.darkMode);
+    this.darkMode = MODE_IDS[(at + 1) % MODE_IDS.length]!;
   }
 
   /** Counts the win and returns the room's tally, for the result card. */
@@ -364,7 +494,10 @@ export class Room {
           players,
           countdownMs,
           map: this.map,
-          gameMode: this.gameMode,
+          gameMode: this.game === 'deadlight' ? this.darkMode : this.playing,
+          game: this.game,
+          darkMode: this.darkMode,
+          session: { ...this.session, games: [...this.session.games] },
           votes,
           voted: [...this.votes].filter(([, voters]) => voters.has(m.id)).map(([id]) => id),
           votesNeeded: this.isPublic ? votesNeeded(this.humans.length) : null,

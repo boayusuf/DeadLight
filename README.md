@@ -29,8 +29,10 @@ kick them.
 
 ## Games
 
-The host picks one in the lobby. Public matchmaking plays the DeadLight modes in
-turn; the lit games are a party pick.
+Six games, picked on the menu or in the lobby's Game tab: DeadLight and the
+five lit ones. **Mix** plays a different one each round, and a session can run
+several games through several runs. Public matchmaking plays the DeadLight
+modes in turn; the lit games are a party pick.
 
 ### DeadLight — played in the dark
 

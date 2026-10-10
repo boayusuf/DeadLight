@@ -49,6 +49,8 @@ export abstract class MiniMatch {
 
   protected readonly players: MiniMatchPlayer[];
   protected readonly startCount: number;
+  /** The game is on screen before it is live, so everyone can read its card. */
+  protected readonly liveAt: number;
   /** Server clock the state carries, so clients can age effects correctly. */
   protected now = 0;
 
@@ -61,6 +63,7 @@ export abstract class MiniMatch {
   ) {
     this.startCount = roster.length;
     this.now = now;
+    this.liveAt = now;
     this.players = roster.map((p, i) => ({
       ...p,
       x: spawns[i]?.x ?? 0,
@@ -108,6 +111,7 @@ export abstract class MiniMatch {
   ): void {
     const p = this.players.find((x) => x.id === id);
     if (!p?.alive || !p.connected || this.over) return;
+    if (this.now < this.liveAt) return;
     if (seq < p.seq) return;
     p.seq = seq;
     p.mx = Number.isFinite(mx) ? Math.max(-1, Math.min(1, mx)) : 0;
@@ -133,7 +137,7 @@ export abstract class MiniMatch {
 
   tick(now: number, dt: number): void {
     this.now = now;
-    if (this.over) return;
+    if (this.over || now < this.liveAt) return;
     this.advance(now, dt);
     this.checkEnd(now);
   }

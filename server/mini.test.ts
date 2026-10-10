@@ -255,7 +255,8 @@ describe('Rooms', () => {
   it('saves a room that holds exactly the number called', () => {
     const game = rooms(4);
     let saved = false;
-    game.advance(26_000, (state) => {
+    // Several calls, so the test does not hinge on one dash to a doorway.
+    game.advance(60_000, (state) => {
       if (state.extra.kind !== 'rooms') return;
       const target = state.extra.target;
       if (state.extra.phase === 'reveal') {

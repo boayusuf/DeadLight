@@ -3,108 +3,161 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#08090d" />
     <title>DeadLight</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Silkscreen:wght@400;700&display=swap"
+    />
   </head>
   <body>
     <canvas id="stage"></canvas>
     <canvas id="lit-stage" hidden></canvas>
     <div id="flash" aria-hidden="true"></div>
 
+    <!-- The card between games: what is about to be played, and how to win it. -->
+    <div id="intro" hidden aria-live="polite">
+      <canvas id="intro-icon" class="pixel" aria-hidden="true"></canvas>
+      <h2 id="intro-name"></h2>
+      <p id="intro-rule"></p>
+      <p id="intro-label"></p>
+    </div>
+
     <div id="overlay">
-      <section class="screen" id="panel-menu">
-        <header class="title">
-          <h1>DEADLIGHT</h1>
+      <section class="screen" id="panel-menu" aria-labelledby="menu-title">
+        <header class="brand">
+          <h1 id="menu-title">DEAD<span>LIGHT</span></h1>
+          <p class="tagline">Last light out wins</p>
         </header>
 
-        <label class="field">
-          <span>Player name</span>
-          <input id="name" maxlength="12" autocomplete="off" spellcheck="false" />
-        </label>
-
-        <div class="actions">
-          <button id="btn-public" class="key">Find match</button>
-          <button id="btn-create" class="key">Create party</button>
+        <div class="picker">
+          <div class="games" id="game-picks" role="group" aria-label="Game"></div>
+          <p class="blurb" id="game-blurb" aria-live="polite"></p>
         </div>
 
-        <form class="field inline" id="form-code">
-          <span>Party code</span>
-          <input id="code" maxlength="4" placeholder="----" autocomplete="off" spellcheck="false" />
-          <button type="submit" class="key">Join</button>
-        </form>
+        <div class="join">
+          <label class="field">
+            <span>Player name</span>
+            <input id="name" maxlength="12" autocomplete="off" spellcheck="false" />
+          </label>
 
-        <p class="error" id="menu-error"></p>
-      </section>
+          <div class="cta">
+            <button id="btn-public" class="btn hot">Quick play</button>
+            <button id="btn-create" class="btn amber">Create party</button>
+          </div>
 
-      <section class="screen" id="panel-lobby" hidden>
-        <header class="title">
-          <h2 id="lobby-title">Party</h2>
-          <p class="sub" id="lobby-sub">Waiting for fighters</p>
-        </header>
+          <form class="codeform" id="form-code">
+            <label for="code">Have a code?</label>
+            <input id="code" maxlength="4" placeholder="----" autocomplete="off" spellcheck="false" />
+            <button type="submit" class="btn steel">Join</button>
+          </form>
 
-        <div class="readout" id="lobby-code-row" hidden>
-          <span>Party code</span>
-          <button class="code" id="lobby-code"></button>
-        </div>
-
-        <div class="readout">
-          <span>Fighters</span>
-          <b id="lobby-count">0/6</b>
-        </div>
-        <ul id="lobby-players"></ul>
-
-        <div class="readout">
-          <span>Fighter</span>
-        </div>
-        <div class="roster" id="lobby-colors"></div>
-
-        <div class="readout">
-          <span>Mode</span>
-          <b id="mode-name"></b>
-        </div>
-        <div class="mode-picks" id="lobby-modes"></div>
-        <p class="sub" id="mode-blurb"></p>
-
-        <div class="readout">
-          <span>Arena</span>
-          <b id="map-name"></b>
-        </div>
-        <div class="map-picks" id="lobby-maps"></div>
-        <p class="sub" id="map-blurb"></p>
-
-        <div class="bots" id="lobby-bots" hidden>
-          <button id="btn-bot" class="key">+ Bot</button>
-          <button id="btn-bot-level" class="key quiet">Level: normal</button>
-        </div>
-
-        <div class="readout">
-          <span>Finisher</span>
-          <b id="finisher-name"></b>
-        </div>
-        <div class="finishers">
-          <canvas id="finisher-preview" aria-hidden="true"></canvas>
-          <div class="finisher-picks" id="lobby-finishers"></div>
-        </div>
-
-        <p class="sub" id="touch-hint" hidden>Left thumb moves &middot; right thumb aims</p>
-
-        <div class="actions">
-          <button id="btn-ready" class="key">Ready</button>
-          <button id="btn-start" class="key" hidden>Start match</button>
-          <button id="btn-music" class="key quiet">Music on &middot; M</button>
-          <button id="btn-leave" class="key quiet">Leave</button>
+          <p class="error" id="menu-error" role="alert"></p>
         </div>
       </section>
 
-      <section class="screen" id="panel-result" hidden>
+      <section class="screen" id="panel-lobby" aria-labelledby="lobby-title" hidden>
+        <header class="strip">
+          <div class="strip-title">
+            <h2 id="lobby-title">Party</h2>
+            <p class="sub" id="lobby-sub">Waiting for fighters</p>
+          </div>
+          <div class="strip-count">
+            <small>Fighters</small>
+            <b id="lobby-count">0/6</b>
+          </div>
+          <div class="strip-code" id="lobby-code-row" hidden>
+            <small id="lobby-code-hint">Tap to copy</small>
+            <button class="code" id="lobby-code" aria-label="Party code, tap to copy"></button>
+          </div>
+        </header>
+
+        <div class="tabs" id="lobby-tabs" role="tablist" aria-label="Lobby sections">
+          <button class="tab" role="tab" id="tab-players" aria-controls="pane-players" aria-selected="true">
+            Players
+          </button>
+          <button class="tab" role="tab" id="tab-game" aria-controls="pane-game" aria-selected="false" tabindex="-1">
+            Game
+          </button>
+          <button class="tab" role="tab" id="tab-look" aria-controls="pane-look" aria-selected="false" tabindex="-1">
+            Look
+          </button>
+        </div>
+
+        <div class="panes" id="lobby-panes">
+          <section class="pane" id="pane-players" role="tabpanel" aria-labelledby="tab-players">
+            <h3 class="pane-title">Players</h3>
+            <ul id="lobby-players"></ul>
+            <div class="bots" id="lobby-bots" hidden>
+              <button id="btn-bot" class="btn steel">+ Bot</button>
+              <button id="btn-bot-level" class="btn ghost">Level: normal</button>
+            </div>
+            <p class="sub" id="touch-hint" hidden>Left thumb moves &middot; right thumb aims</p>
+          </section>
+
+          <section class="pane" id="pane-game" role="tabpanel" aria-labelledby="tab-game">
+            <h3 class="pane-title">Game <b id="lobby-game"></b></h3>
+            <div class="map-picks modes" id="lobby-games" role="group" aria-label="Play mode"></div>
+
+            <div id="mode-section">
+              <div class="setting-head"><span>DeadLight mode</span><b id="mode-name"></b></div>
+              <div class="map-picks modes" id="lobby-modes" role="group" aria-label="DeadLight mode"></div>
+              <p class="sub" id="mode-blurb"></p>
+            </div>
+
+            <div id="vote-section">
+              <div class="setting">
+                <div class="setting-head"><span>Runs</span><b id="vote-runs-total"></b></div>
+                <div class="stepper" id="vote-runs" role="group" aria-label="Runs"></div>
+              </div>
+              <div id="vote-mix">
+                <div class="setting">
+                  <div class="setting-head"><span>Games per run</span><b id="vote-count-total"></b></div>
+                  <div class="stepper" id="vote-count" role="group" aria-label="Games per run"></div>
+                </div>
+                <div class="setting">
+                  <div class="setting-head"><span>Vote games</span></div>
+                  <div class="map-picks toggles" id="vote-games" role="group" aria-label="Vote games"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="map-section">
+              <div class="setting-head"><span>Arena</span><b id="map-name"></b></div>
+              <div class="map-picks maps" id="lobby-maps" role="group" aria-label="Arena"></div>
+              <p class="sub" id="map-blurb"></p>
+            </div>
+          </section>
+
+          <section class="pane" id="pane-look" role="tabpanel" aria-labelledby="tab-look">
+            <h3 class="pane-title">Fighter</h3>
+            <div class="look-top">
+              <canvas id="finisher-preview" aria-hidden="true"></canvas>
+              <div class="roster" id="lobby-colors" role="group" aria-label="Fighter"></div>
+            </div>
+            <h3 class="pane-title">Finisher <b id="finisher-name"></b></h3>
+            <div class="finisher-picks" id="lobby-finishers" role="group" aria-label="Finisher"></div>
+          </section>
+        </div>
+
+        <div class="bar">
+          <button id="btn-ready" class="btn hot big">Ready</button>
+          <button id="btn-start" class="btn amber big" hidden>Start</button>
+          <button id="btn-music" class="icon-btn" aria-pressed="true"></button>
+          <button id="btn-leave" class="icon-btn" aria-label="Leave party"></button>
+        </div>
+      </section>
+
+      <section class="screen" id="panel-result" aria-labelledby="result-title" hidden>
         <h2 id="result-title">Eliminated</h2>
-        <canvas id="result-sprite" width="56" height="80"></canvas>
+        <div class="portrait"><canvas id="result-sprite" width="56" height="80"></canvas></div>
         <p class="sub" id="result-detail"></p>
         <p class="stats" id="result-stats"></p>
         <ol id="result-standings"></ol>
-        <div class="actions">
-          <button id="btn-again" class="key">Rematch</button>
-        </div>
+        <button id="btn-again" class="btn hot big">Rematch</button>
       </section>
     </div>
 

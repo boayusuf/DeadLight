@@ -30,16 +30,18 @@ import {
   type MapChoice,
 } from '../shared/maps.js';
 import {
-  MINI_GAME_IDS,
+  GAME_IDS,
+  GAME_NAMES,
   gameModeBlurb,
   gameModeMinPlayers,
   gameModeName,
   isMiniGameId,
+  type GameChoice,
   type GameMode,
 } from '../shared/games.js';
 import { MODE_IDS, onPath } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
-import type { LobbyPlayer, ServerMessage, Standing } from '../shared/protocol.js';
+import type { LobbyPlayer, ServerMessage, SessionSetup, Standing } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
 import { Sfx } from './audio.js';
 import { calloutFor, killerOf } from './callouts.js';
@@ -51,6 +53,7 @@ import { obstacleSound } from './obstacles.js';
 import { Music } from './music.js';
 import { Net, wake } from './net.js';
 import { Prediction } from './prediction.js';
+import { paintIcon } from './gameicons.js';
 import { MiniRenderer, type MiniScene } from './mini.js';
 import { HIT_STOP_MS, INTRO_MS, Renderer, type Scene } from './render.js';
 import { solidFloor, stepCollapse } from '../shared/collapse.js';
@@ -95,6 +98,27 @@ const dom = {
   modeName: el('mode-name'),
   modeBlurb: el('mode-blurb'),
   modePicks: el('lobby-modes'),
+  modeSection: el('mode-section'),
+  gamePicks: el('game-picks'),
+  gameBlurb: el('game-blurb'),
+  lobbyGame: el('lobby-game'),
+  lobbyGames: el('lobby-games'),
+  tabs: el('lobby-tabs'),
+  panes: el('lobby-panes'),
+  voteSection: el('vote-section'),
+  voteMix: el('vote-mix'),
+  voteRuns: el('vote-runs'),
+  voteRunsTotal: el('vote-runs-total'),
+  voteCount: el('vote-count'),
+  voteCountTotal: el('vote-count-total'),
+  voteGames: el('vote-games'),
+  mapSection: el('map-section'),
+  touchHint: el('touch-hint'),
+  intro: el('intro'),
+  introIcon: el<HTMLCanvasElement>('intro-icon'),
+  introName: el('intro-name'),
+  introRule: el('intro-rule'),
+  introLabel: el('intro-label'),
   mapName: el('map-name'),
   mapBlurb: el('map-blurb'),
   mapPicks: el('lobby-maps'),
@@ -286,7 +310,48 @@ const mapPicks = (['random', ...MAP_IDS] as MapChoice[]).map((map) => {
 });
 
 /** The four modes. Only the host's buttons do anything, and only in a party. */
-const modePicks = [...MODE_IDS, ...MINI_GAME_IDS].map((mode: GameMode) => {
+/** The seven buttons: six games and a mix of them. */
+const GAME_CHOICES: GameChoice[] = [...GAME_IDS, 'mix'];
+
+/** What this player wants to play, picked on the menu before a room exists. */
+let wanted: GameChoice = 'deadlight';
+
+/** A card on the menu: the game's own picture over its name. */
+const gameCards = GAME_CHOICES.map((game) => {
+  const button = document.createElement('button');
+  button.className = game === 'mix' ? 'game mix' : 'game';
+  const pixel = document.createElement('canvas');
+  pixel.className = 'pixel';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  button.append(pixel, name);
+  button.addEventListener('click', () => {
+    wanted = game;
+    showWanted();
+    if (panel === 'lobby') net.send({ t: 'mode', mode: game });
+  });
+  dom.gamePicks.append(button);
+  return { game, button, pixel };
+});
+
+/** The same seven in the lobby, where only the host may press them. */
+const gamePicks = GAME_CHOICES.map((game) => {
+  const button = document.createElement('button');
+  button.className = 'key mode';
+  const pixel = document.createElement('canvas');
+  pixel.className = 'pixel';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  button.append(pixel, name);
+  button.addEventListener('click', () => net.send({ t: 'mode', mode: game }));
+  dom.lobbyGames.append(button);
+  return { game, button, pixel };
+});
+
+/** The dark game's own four modes, shown only when it is the game. */
+const modePicks = MODE_IDS.map((mode) => {
   const button = document.createElement('button');
   button.className = 'key';
   button.textContent = gameModeName(mode);
@@ -295,17 +360,161 @@ const modePicks = [...MODE_IDS, ...MINI_GAME_IDS].map((mode: GameMode) => {
   return { mode, button };
 });
 
-function showMode(choice: GameMode, host: boolean, party: boolean, seated: number): void {
-  const short = seated < gameModeMinPlayers(choice);
-  dom.modeName.textContent = party ? gameModeName(choice) : `Next: ${gameModeName(choice)}`;
-  dom.modeBlurb.textContent = short
-    ? `Needs ${gameModeMinPlayers(choice)} fighters or more.`
-    : gameModeBlurb(choice);
-  dom.modeBlurb.classList.toggle('warn', short);
-  for (const { mode, button } of modePicks) {
-    button.classList.toggle('mine', mode === choice);
-    button.disabled = !host || !party;
+/** Which games 'mix' may draw from. */
+const poolPicks = GAME_IDS.map((game) => {
+  const button = document.createElement('button');
+  button.className = 'key';
+  button.textContent = GAME_NAMES[game];
+  button.addEventListener('click', () => {
+    const pool = new Set(session.games);
+    if (pool.has(game)) pool.delete(game);
+    else pool.add(game);
+    if (pool.size === 0) return;
+    net.send({ t: 'session', games: [...pool] });
+  });
+  dom.voteGames.append(button);
+  return { game, button };
+});
+
+/** Runs, and games per run: a row of numbers, the chosen one lit. */
+function stepper(host: HTMLElement, from: number, to: number, send: (value: number) => void) {
+  const steps = [];
+  for (let value = from; value <= to; value++) {
+    const button = document.createElement('button');
+    button.className = 'key';
+    button.textContent = String(value);
+    button.addEventListener('click', () => send(value));
+    host.append(button);
+    steps.push({ value, button });
   }
+  return steps;
+}
+
+const runSteps = stepper(dom.voteRuns, 1, 5, (runs) => net.send({ t: 'session', runs }));
+const countSteps = stepper(dom.voteCount, 1, 9, (count) => net.send({ t: 'session', count }));
+
+/** The session as the room last described it. */
+let session: SessionSetup = { runs: 1, count: 3, games: [...GAME_IDS] };
+
+
+/** The lobby's three panes. On a phone they swipe; the tabs drive the scroll. */
+const TABS = ['players', 'game', 'look'] as const;
+const tabButtons = TABS.map((name) => el<HTMLButtonElement>(`tab-${name}`));
+const tabPanes = TABS.map((name) => el(`pane-${name}`));
+
+function showTab(index: number, scroll = true): void {
+  tabButtons.forEach((button, i) => {
+    button.setAttribute('aria-selected', String(i === index));
+    button.tabIndex = i === index ? 0 : -1;
+  });
+  if (!scroll) return;
+  const pane = tabPanes[index];
+  if (pane) dom.panes.scrollTo({ left: pane.offsetLeft - dom.panes.offsetLeft, behavior: 'smooth' });
+}
+
+tabButtons.forEach((button, i) => button.addEventListener('click', () => showTab(i)));
+// A swipe moves the tabs rather than leaving them behind.
+dom.panes.addEventListener('scroll', () => {
+  const width = dom.panes.clientWidth || 1;
+  showTab(Math.max(0, Math.min(TABS.length - 1, Math.round(dom.panes.scrollLeft / width))), false);
+});
+showTab(0, false);
+
+/** The pictures on the buttons animate, slowly, whether or not anything else does. */
+function paintIcons(now: number): void {
+  for (const card of gameCards) paintIcon(card.pixel, card.game, now);
+  for (const pick of gamePicks) paintIcon(pick.pixel, pick.game, now);
+  paintIcon(musicPixel, music.muted ? 'muted' : 'music', now);
+  paintIcon(leavePixel, 'leave', now);
+}
+
+/** The icon buttons in the bar carry a drawn glyph, not a letter. */
+const musicPixel = document.createElement('canvas');
+musicPixel.className = 'pixel';
+dom.btnMusic.replaceChildren(musicPixel);
+const leavePixel = document.createElement('canvas');
+leavePixel.className = 'pixel';
+dom.btnLeave.replaceChildren(leavePixel);
+
+/** Where the session is up to, shown in the corner of a lit game's HUD. */
+let sessionLabel = '';
+
+/** The card between games: shown as a game is announced, gone when it is live. */
+let introUntil = 0;
+let introGame: GameChoice = 'deadlight';
+
+function announceGame(msg: Extract<ServerMessage, { t: 'session' }>, now: number): void {
+  const game: GameChoice = isMiniGameId(msg.next) ? msg.next : 'deadlight';
+  introGame = game;
+  introUntil = now + msg.startsInMs;
+  dom.introName.textContent = game === 'deadlight' ? GAME_NAMES.deadlight : GAME_NAMES[game];
+  dom.introRule.textContent = gameModeBlurb(msg.next);
+  const parts: string[] = [];
+  if (msg.runs > 1) parts.push(`RUN ${msg.run}/${msg.runs}`);
+  if (msg.games > 1) parts.push(`GAME ${msg.game}/${msg.games}`);
+  sessionLabel = parts.join('  ');
+  if (lit) lit.label = sessionLabel;
+  parts.push('LAST ONE STANDING');
+  dom.introLabel.textContent = parts.join('  ·  ');
+  dom.intro.hidden = false;
+}
+
+/** The menu picker shows what this player will ask for. */
+function showWanted(): void {
+  for (const card of gameCards) card.button.classList.toggle('mine', card.game === wanted);
+  dom.gameBlurb.textContent =
+    wanted === 'mix' ? 'A different game every round.' : gameModeBlurb(wanted === 'deadlight' ? 'classic' : wanted);
+}
+
+
+/** The Game pane: what the room is set to, and what the host may change. */
+function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
+  const { game, darkMode, host } = msg;
+  const party = msg.code !== null;
+  const seated = msg.players.length;
+  session = msg.session;
+  wanted = game;
+
+  const name = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  dom.lobbyGame.textContent = party ? name : `Next: ${name}`;
+  for (const pick of gamePicks) {
+    pick.button.classList.toggle('mine', pick.game === game);
+    pick.button.disabled = !host || !party;
+  }
+  for (const card of gameCards) card.button.classList.toggle('mine', card.game === game);
+
+  // The dark game keeps its four modes; the lit ones have none.
+  dom.modeSection.hidden = game !== 'deadlight';
+  const short = seated < gameModeMinPlayers(game === 'deadlight' ? darkMode : (game as GameMode));
+  dom.modeName.textContent = gameModeName(darkMode);
+  dom.modeBlurb.textContent = short
+    ? `Needs ${gameModeMinPlayers(darkMode)} fighters or more.`
+    : gameModeBlurb(darkMode);
+  dom.modeBlurb.classList.toggle('warn', short);
+  for (const pick of modePicks) {
+    pick.button.classList.toggle('mine', pick.mode === darkMode);
+    pick.button.disabled = !host || !party;
+  }
+
+  // Runs always apply; the pool and the games-per-run only matter for a mix.
+  dom.voteMix.hidden = game !== 'mix';
+  dom.voteRunsTotal.textContent = `${session.runs}`;
+  dom.voteCountTotal.textContent = `${session.count}`;
+  for (const step of runSteps) {
+    step.button.classList.toggle('mine', step.value === session.runs);
+    step.button.disabled = !host || !party;
+  }
+  for (const step of countSteps) {
+    step.button.classList.toggle('mine', step.value === session.count);
+    step.button.disabled = !host || !party;
+  }
+  for (const pick of poolPicks) {
+    pick.button.classList.toggle('mine', session.games.includes(pick.game));
+    pick.button.disabled = !host || !party;
+  }
+
+  // A lit game ignores the arena, so the picker goes away with it.
+  dom.mapSection.hidden = game !== 'deadlight' && game !== 'mix';
 }
 
 function showMap(choice: MapChoice, host: boolean, party: boolean): void {
@@ -355,7 +564,7 @@ function handle(msg: ServerMessage): void {
       dom.lobbyCount.textContent = `${msg.players.length}/${MAX_PLAYERS}`;
       dom.btnStart.hidden = !msg.code || !msg.host;
       dom.btnStart.disabled = msg.players.length < Math.max(2, gameModeMinPlayers(msg.gameMode));
-      showMode(msg.gameMode, msg.host, msg.code !== null, msg.players.length);
+      showGame(msg);
       isHost = msg.host;
       dom.botRow.hidden = !msg.code || !msg.host;
       dom.btnBot.disabled = msg.players.length >= MAX_PLAYERS;
@@ -441,6 +650,11 @@ function handle(msg: ServerMessage): void {
       renderer.configure(scene.baseSize);
       renderer.clearEffects();
       show(null);
+      return;
+    }
+
+    case 'session': {
+      announceGame(msg, performance.now());
       return;
     }
 
@@ -614,6 +828,12 @@ function handle(msg: ServerMessage): void {
         }),
       );
 
+      const more = msg.sessionLeft ?? 0;
+      dom.btnAgain.hidden = more > 0;
+      if (more > 0) {
+        dom.resultDetail.textContent = `${more} ${more === 1 ? 'game' : 'games'} left in the session`;
+      }
+
       // The result card waits for the killcam to play out, finale card and all.
       const killcamLeft = scene.killcam ? scene.killcam.startedAt + KILLCAM_MS - performance.now() : 0;
       resultPending = true;
@@ -657,9 +877,19 @@ function startLit(kind: Parameters<typeof litRenderer.configure>[0], players: re
     scores: {},
     extra: emptyExtra(kind),
     selfId: scene.selfId,
-    roster: new Map(players.map((p) => [p.id, { color: rgb(p.color), name: p.name }])),
+    label: sessionLabel,
+    roster: new Map(
+      players.map((p) => [p.id, { color: rgb(p.color), name: p.name, archetype: archetypeOf(p.color) }]),
+    ),
     self: null,
   };
+  // The result card and its standings read the match roster, whichever game it was.
+  scene.roster = new Map(
+    players.map((p) => [
+      p.id,
+      { name: p.name, color: rgb(p.color), archetype: archetypeOf(p.color), finisher: p.finisher },
+    ]),
+  );
   litVelocity = null;
   scene.inMatch = true;
   scene.spectating = false;
@@ -957,10 +1187,20 @@ function tickInterval(elapsed: number): number {
 }
 
 let lastFrame = performance.now();
+let lastIcons = 0;
 
 function loop(now: number): void {
   const dt = Math.min((now - lastFrame) / 1000, 0.05);
   lastFrame = now;
+
+  if (now - lastIcons > 120) {
+    lastIcons = now;
+    paintIcons(now);
+  }
+  if (!dom.intro.hidden) {
+    paintIcon(dom.introIcon, introGame, now);
+    if (now >= introUntil) dom.intro.hidden = true;
+  }
 
   if (lit) {
     litFrame(now, dt);
@@ -1067,6 +1307,8 @@ async function join(mode: 'public' | 'create' | 'code'): Promise<void> {
 
   if (mode === 'code') net.send({ t: 'join', name, finisher, mode, code: dom.code.value });
   else net.send({ t: 'join', name, finisher, mode });
+  // A party opens on the game picked from the menu; matchmaking sets its own.
+  if (mode === 'create' && wanted !== 'deadlight') net.send({ t: 'mode', mode: wanted });
 }
 
 dom.name.value = localStorage.getItem('deadlight.name') ?? '';
@@ -1106,6 +1348,7 @@ dom.lobbyCode.addEventListener('click', () => {
 
 wake();
 showFinisher();
+showWanted();
 showMusic();
 show('menu');
 requestAnimationFrame(loop);

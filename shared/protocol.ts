@@ -1,7 +1,7 @@
 import type { FinisherId } from './constants.js';
 import type { CollapseExtra } from './collapse.js';
 import type { FreezeExtra } from './freeze.js';
-import type { GameMode, MiniGameId } from './games.js';
+import type { GameChoice, GameMode, MiniGameId } from './games.js';
 import type { PotatoExtra } from './potato.js';
 import type { RoomsExtra } from './rooms.js';
 import type { SumoExtra } from './sumo.js';
@@ -82,8 +82,10 @@ export type ClientMessage =
   | { t: 'finisher'; finisher: string }
   /** Host only: the arena for the next match. */
   | { t: 'map'; map: string }
-  /** Host only: the game mode for the next match. */
+  /** Host only: the game, 'mix', or a DeadLight mode for the next match. */
   | { t: 'mode'; mode: string }
+  /** Host only: how long a session runs and which games it draws from. */
+  | { t: 'session'; runs?: number; count?: number; games?: string[] }
   /** Host only: seat a bot, or remove one by id. */
   | { t: 'bot'; add: true; difficulty: string }
   | { t: 'bot'; add: false; id: string }
@@ -114,6 +116,11 @@ export type ServerMessage
       countdownMs: number | null;
       map: MapChoice;
       gameMode: GameMode;
+      /** The game the room is set to, or 'mix' for a different one each time. */
+      game: GameChoice;
+      /** Which DeadLight mode the dark game is set to. */
+      darkMode: ModeId;
+      session: SessionSetup;
       /** Matchmaking kick votes against each player, and the ones this player cast. */
       votes: Record<string, number>;
       voted: string[];
@@ -175,6 +182,21 @@ export type ServerMessage
       standings: Standing[];
       wins: Record<string, number>;
       gameMode: GameMode;
+      /** Games still to play in this session; 0 when the session is over. */
+      sessionLeft?: number;
+    }
+  /**
+   * Where the session is up to, sent as each game begins: "RUN 1/2 GAME 2/3".
+   * `startsInMs` is the get-ready beat before the game goes live.
+   */
+  | {
+      t: 'session';
+      run: number;
+      runs: number;
+      game: number;
+      games: number;
+      next: GameMode;
+      startsInMs: number;
     }
   /**
    * The lit games, several times a second. Nothing is hidden in them, so every
@@ -210,3 +232,13 @@ export type MiniExtra =
   | ({ kind: 'rooms' } & RoomsExtra)
   | ({ kind: 'sumo' } & SumoExtra)
   | ({ kind: 'potato' } & PotatoExtra);
+
+/** How long a session lasts, and which games it may draw from. */
+export interface SessionSetup {
+  /** Times the whole set of games is played through. */
+  runs: number;
+  /** Games in one run. Only used when the room is set to 'mix'. */
+  count: number;
+  /** The pool 'mix' draws from. */
+  games: GameChoice[];
+}

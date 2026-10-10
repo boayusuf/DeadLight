@@ -24,6 +24,7 @@ import {
 import { FLOE_SEGMENTS, SEGMENT_ARC, SUMO_FALL_MS } from '../shared/sumo.js';
 import { GLYPH_H } from './font.js';
 import { PixelBuffer } from './pixel.js';
+import { SPRITE_H, SPRITE_W, facingFor, sprite, type Sprite } from './sprites.js';
 
 /** World units per buffer pixel, the same grid the dark game is drawn on. */
 const UNITS_PER_PX = 4;
@@ -33,6 +34,7 @@ const FLOOR = 0x1b2029;
 const FLOOR_ALT = 0x20262f;
 const WALL_C = 0x39424f;
 const LINE = 0x7f8b9c;
+const INK = 0x9aa6b8;
 const PALE = 0xccd6e2;
 const WARN = 0xc9a23c;
 const DANGER = 0xd8433f;
@@ -49,6 +51,8 @@ const BOMB = 0x2b2f38;
 export interface MiniRoster {
   color: number;
   name: string;
+  /** Which of the ten fighter designs this colour wears. */
+  archetype: number;
 }
 
 export interface MiniScene {
@@ -58,6 +62,8 @@ export interface MiniScene {
   players: MiniPlayer[];
   scores: Record<string, number>;
   extra: MiniExtra;
+  /** Where the session is up to, for the corner of the HUD. */
+  label: string;
   selfId: string;
   roster: Map<string, MiniRoster>;
   /** The local fighter's predicted position, which leads the server's by a tick. */
@@ -81,6 +87,8 @@ export class MiniRenderer {
   private view = { w: 1200, h: 1200 };
   /** Camera offset in world units; only the long corridor ever moves it. */
   private camera = { x: 0, y: 0 };
+  /** Where each fighter was last seen standing, for the walk cycle. */
+  private readonly steps = new Map<string, { x: number; y: number; at: number }>();
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -159,7 +167,7 @@ export class MiniRenderer {
         break;
     }
 
-    this.fighters(scene);
+    this.fighters(scene, now);
     this.hud(scene);
     this.buffer.present(this.ctx, this.scale);
   }
@@ -463,26 +471,58 @@ export class MiniRenderer {
 
   // --- Fighters and HUD -------------------------------------------------------
 
-  private fighters(scene: MiniScene): void {
+  private fighters(scene: MiniScene, now: number): void {
     const b = this.buffer;
     const dashing = dashingIn(scene.extra);
-    for (const p of scene.players) {
+    // Back to front, so a fighter lower down the floor overlaps the one behind.
+    const order = [...scene.players].sort((p, q) => p.y - q.y);
+    for (const p of order) {
       if (p.state === 'out') continue;
       const own = p.id === scene.selfId;
       const at = own && scene.self ? scene.self : p;
-      const colour = scene.roster.get(p.id)?.color ?? PALE;
+      const who = scene.roster.get(p.id);
+      const colour = who?.color ?? PALE;
       const x = this.px(at.x);
       const y = this.py(at.y);
-      const r = Math.max(2, this.units(PLAYER_RADIUS));
 
-      if (dashing.has(p.id)) b.glow(x, y, r * 2.2, colour, 0.5);
-      b.disc(x, y + 1, r, BACK, 0.45);
-      b.disc(x, y, r, colour);
-      b.ring(x, y, r, own ? PALE : BACK, own ? 0.9 : 0.5);
-      // A short barrel so a fighter reads as facing somewhere.
-      const aim = at.aim ?? 0;
-      b.line(x, y, x + Math.cos(aim) * r * 1.6, y + Math.sin(aim) * r * 1.6, colour, 0.9);
-      if (own) b.disc(x, y, Math.max(1, r * 0.3), BACK, 0.8);
+      if (dashing.has(p.id)) b.glow(x, y, this.units(PLAYER_RADIUS) * 2.2, colour, 0.5);
+      // A soft shadow keeps everyone standing on the floor rather than over it.
+      b.disc(x, y + 2, Math.max(2, this.units(PLAYER_RADIUS) * 0.8), BACK, 0.45);
+
+      const walking = this.walking(p.id, at, now);
+      const { facing, flip } = facingFor(at.aim ?? 0);
+      const frame = walking ? Math.floor(now / 110) % 4 : 0;
+      const art = sprite(facing, frame, who?.archetype ?? 0, colour);
+      this.blit(art, x - (SPRITE_W >> 1), y - SPRITE_H + 4, flip, own ? colour : undefined);
+    }
+  }
+
+  /** Whether a fighter has moved lately, for the walk cycle. */
+  private walking(id: string, at: { x: number; y: number }, now: number): boolean {
+    const was = this.steps.get(id);
+    const moved = was ? Math.hypot(at.x - was.x, at.y - was.y) > 0.6 : false;
+    if (!was || moved) this.steps.set(id, { x: at.x, y: at.y, at: now });
+    return moved || (was !== undefined && now - was.at < 160);
+  }
+
+  /** One sprite, with an optional rim so a player can find themselves. */
+  private blit(art: Sprite, left: number, top: number, flip: boolean, rim?: number): void {
+    const b = this.buffer;
+    const at = (x: number, y: number): number => {
+      if (x < 0 || y < 0 || x >= art.width || y >= art.height) return -1;
+      return art.pixels[y * art.width + (flip ? art.width - 1 - x : x)]!;
+    };
+    for (let y = 0; y < art.height; y++) {
+      for (let x = 0; x < art.width; x++) {
+        const colour = at(x, y);
+        if (colour < 0) {
+          if (rim === undefined) continue;
+          const touching = at(x - 1, y) >= 0 || at(x + 1, y) >= 0 || at(x, y - 1) >= 0 || at(x, y + 1) >= 0;
+          if (touching) b.add(left + x, top + y, rim, 0.5);
+          continue;
+        }
+        b.blend(left + x, top + y, colour, 1);
+      }
     }
   }
 
@@ -494,6 +534,9 @@ export class MiniRenderer {
     const standing = scene.players.filter((p) => p.state === 'alive').length;
     const right = `${standing} LEFT`;
     b.text(right, b.width - 6 - b.textWidth(right), 5, PALE, 0.9);
+    if (scene.label) {
+      b.text(scene.label, Math.round((b.width - b.textWidth(scene.label)) / 2), 5, INK, 0.9);
+    }
 
     const note = this.caption(scene);
     if (note) {
