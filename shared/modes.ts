@@ -44,11 +44,20 @@ export const ROUND_CYCLES: Record<RoundModeId, number> = {
 export const CONTRACT_KILLS = 3;
 
 /**
- * Rounds in a match. Hunted and Ghost give every fighter the same number of
- * turns in the middle, so the count is a multiple of the player count.
+ * Points that win a match outright, where a mode is played to a score rather
+ * than to a number of rounds. Ghost is first to three: short enough to stay
+ * tense, long enough that one lucky shot does not decide it.
+ */
+export const WIN_SCORE: Partial<Record<RoundModeId, number>> = { ghost: 3 };
+
+/**
+ * Rounds in a match. Hunted gives every fighter the same number of turns in
+ * the middle, so the count is a multiple of the player count. Ghost is played
+ * to a score, and this is only the cap that stops a match running forever.
  */
 export function roundCount(mode: RoundModeId, players: number): number {
   if (mode === 'assassin') return 3;
+  if (mode === 'ghost') return Math.max(players, 3) * (WIN_SCORE.ghost ?? 3);
   const turns = Math.ceil(6 / players);
   return turns * players;
 }

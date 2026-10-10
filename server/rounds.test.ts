@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_FINISHER, HIT_RADIUS, PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
 import { openWorld } from '../shared/maps.js';
-import { ROUND_CYCLES, insideZone, type RoundModeId } from '../shared/modes.js';
+import { ROUND_CYCLES, WIN_SCORE, insideZone, type RoundModeId } from '../shared/modes.js';
 import type { Brief, LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { RoundMatch } from './rounds.js';
 
@@ -493,6 +493,16 @@ describe('round modes and the network', () => {
     const over = h.last('over');
     const scores = over.standings.map((s) => s.score!);
     expect([...scores].sort((x, y) => y - x)).toEqual(scores);
-    expect(scores.reduce((sum, s) => sum + s, 0)).toBe(h.match.rounds);
+    // Every round awards exactly one point, and Ghost stops at the winning one.
+    expect(scores.reduce((sum, s) => sum + s, 0)).toBe(over.rounds);
+    expect(scores[0]).toBe(WIN_SCORE.ghost);
+  });
+
+  it('plays Ghost to a score rather than a fixed number of rounds', () => {
+    const h = setup(['a', 'b', 'c', 'd'], 'ghost', 15);
+    playQuietly(h);
+    const over = h.last('over');
+    expect(over.standings[0]!.score).toBe(WIN_SCORE.ghost);
+    expect(over.rounds).toBeLessThan(h.match.rounds);
   });
 });

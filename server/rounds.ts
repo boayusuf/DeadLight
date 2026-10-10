@@ -2,6 +2,7 @@ import { openWorld, spawnsFor, type MapId } from '../shared/maps.js';
 import {
   CONTRACT_KILLS,
   ROUND_CYCLES,
+  WIN_SCORE,
   dealContracts,
   huntLine,
   nextFocus,
@@ -107,7 +108,7 @@ export class RoundMatch extends Match {
       super.startBlackout(now);
       return;
     }
-    if (this.roundIndex >= this.rounds) this.finish(now);
+    if (this.roundIndex >= this.rounds || this.won()) this.finish(now);
     else this.beginRound(now);
   }
 
@@ -406,6 +407,13 @@ export class RoundMatch extends Match {
   }
 
   // --- the end ------------------------------------------------------------------
+
+  /** Whether anyone has taken the match on points, in a mode played to a score. */
+  private won(): boolean {
+    const target = WIN_SCORE[this.mode];
+    if (target === undefined) return false;
+    return [...this.scores.values()].some((score) => score >= target);
+  }
 
   private finish(now: number): void {
     this.phase = 'over';

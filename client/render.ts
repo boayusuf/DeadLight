@@ -11,7 +11,15 @@ import {
   STAGE_SCALE,
 } from '../shared/constants.js';
 import type { FinisherId } from '../shared/constants.js';
-import { CONTRACT_KILLS, MODE_NAMES, ROUND_CYCLES, type ModeId, type Zone } from '../shared/modes.js';
+import {
+  CONTRACT_KILLS,
+  MODE_NAMES,
+  ROUND_CYCLES,
+  WIN_SCORE,
+  type ModeId,
+  type RoundModeId,
+  type Zone,
+} from '../shared/modes.js';
 import type { Brief, ReplayTrack, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
 import { killerOf } from './callouts.js';
@@ -1336,7 +1344,11 @@ export class Renderer {
     buffer.text(mode, cx - Math.round(buffer.textWidth(mode, 2) / 2), pad, PALE, 0.95 * dim, 2);
 
     if (round) {
-      const label = `ROUND ${String(round.round).padStart(2, '0')}/${String(round.rounds).padStart(2, '0')}`;
+      // A mode played to a score counts points, not rounds.
+      const target = WIN_SCORE[scene.mode as RoundModeId];
+      const label = target
+        ? `FIRST TO ${target}`
+        : `ROUND ${String(round.round).padStart(2, '0')}/${String(round.rounds).padStart(2, '0')}`;
       buffer.text(label, cx - Math.round(buffer.textWidth(label) / 2), pad + 13, INK, 0.8 * dim);
     }
 
