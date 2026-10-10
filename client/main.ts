@@ -7,6 +7,7 @@ import {
   FUNNY_FINISHERS,
   KILLCAM_MS,
   MAX_PLAYERS,
+  MOVE_SPEED,
   PLAYER_RADIUS,
   PLAYER_COLORS,
   RESOLVE_DELAY_MS,
@@ -29,13 +30,14 @@ import {
   type MapChoice,
 } from '../shared/maps.js';
 import {
-  MODE_BLURBS,
-  MODE_IDS,
-  MODE_MIN_PLAYERS,
-  MODE_NAMES,
-  onPath,
-  type ModeId,
-} from '../shared/modes.js';
+  MINI_GAME_IDS,
+  gameModeBlurb,
+  gameModeMinPlayers,
+  gameModeName,
+  isMiniGameId,
+  type GameMode,
+} from '../shared/games.js';
+import { MODE_IDS, onPath } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { LobbyPlayer, ServerMessage, Standing } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
@@ -49,7 +51,13 @@ import { obstacleSound } from './obstacles.js';
 import { Music } from './music.js';
 import { Net, wake } from './net.js';
 import { Prediction } from './prediction.js';
+import { MiniRenderer, type MiniScene } from './mini.js';
 import { HIT_STOP_MS, INTRO_MS, Renderer, type Scene } from './render.js';
+import { solidFloor, stepCollapse } from '../shared/collapse.js';
+import { stepFreeze } from '../shared/freeze.js';
+import { stepPotato } from '../shared/potato.js';
+import { ROOM_COUNT, stepRooms } from '../shared/rooms.js';
+import { freshFloe } from '../shared/sumo.js';
 import { SPRITE_H, SPRITE_W, sprite } from './sprites.js';
 
 function el<T extends HTMLElement>(id: string): T {
@@ -102,8 +110,11 @@ const dom = {
 };
 
 const stage = el<HTMLCanvasElement>('stage');
+const litStage = el<HTMLCanvasElement>('lit-stage');
 const renderer = new Renderer(stage);
+const litRenderer = new MiniRenderer(litStage);
 const input = new Input(stage);
+input.attach(litStage);
 const sfx = new Sfx();
 const music = new Music();
 const prediction = new Prediction();
@@ -134,6 +145,11 @@ const scene: Scene = {
   brief: null,
   cycle: 0,
 };
+
+/** The lit game being played, or null while this is the dark one. */
+let lit: MiniScene | null = null;
+/** Sumo slides, so between states the fighter is carried on its own momentum. */
+let litVelocity: { x: number; y: number } | null = null;
 
 let panel: 'menu' | 'lobby' | 'result' | null = 'menu';
 let nextTickAt = 0;
@@ -270,19 +286,21 @@ const mapPicks = (['random', ...MAP_IDS] as MapChoice[]).map((map) => {
 });
 
 /** The four modes. Only the host's buttons do anything, and only in a party. */
-const modePicks = MODE_IDS.map((mode) => {
+const modePicks = [...MODE_IDS, ...MINI_GAME_IDS].map((mode: GameMode) => {
   const button = document.createElement('button');
   button.className = 'key';
-  button.textContent = MODE_NAMES[mode];
+  button.textContent = gameModeName(mode);
   button.addEventListener('click', () => net.send({ t: 'mode', mode }));
   dom.modePicks.append(button);
   return { mode, button };
 });
 
-function showMode(choice: ModeId, host: boolean, party: boolean, seated: number): void {
-  const short = seated < MODE_MIN_PLAYERS[choice];
-  dom.modeName.textContent = party ? MODE_NAMES[choice] : `Next: ${MODE_NAMES[choice]}`;
-  dom.modeBlurb.textContent = short ? `Needs ${MODE_MIN_PLAYERS[choice]} fighters or more.` : MODE_BLURBS[choice];
+function showMode(choice: GameMode, host: boolean, party: boolean, seated: number): void {
+  const short = seated < gameModeMinPlayers(choice);
+  dom.modeName.textContent = party ? gameModeName(choice) : `Next: ${gameModeName(choice)}`;
+  dom.modeBlurb.textContent = short
+    ? `Needs ${gameModeMinPlayers(choice)} fighters or more.`
+    : gameModeBlurb(choice);
   dom.modeBlurb.classList.toggle('warn', short);
   for (const { mode, button } of modePicks) {
     button.classList.toggle('mine', mode === choice);
@@ -325,6 +343,8 @@ const picks = PLAYER_COLORS.map((color) => {
 function handle(msg: ServerMessage): void {
   switch (msg.t) {
     case 'lobby': {
+      // Back in the lobby: the dark game owns the screen again.
+      endLit();
       scene.selfId = msg.selfId;
       countdownEndsAt = msg.countdownMs === null ? null : performance.now() + msg.countdownMs;
       ready = msg.players.find((p) => p.id === msg.selfId)?.ready ?? false;
@@ -334,7 +354,7 @@ function handle(msg: ServerMessage): void {
       dom.lobbyCode.textContent = msg.code ?? '';
       dom.lobbyCount.textContent = `${msg.players.length}/${MAX_PLAYERS}`;
       dom.btnStart.hidden = !msg.code || !msg.host;
-      dom.btnStart.disabled = msg.players.length < Math.max(2, MODE_MIN_PLAYERS[msg.gameMode]);
+      dom.btnStart.disabled = msg.players.length < Math.max(2, gameModeMinPlayers(msg.gameMode));
       showMode(msg.gameMode, msg.host, msg.code !== null, msg.players.length);
       isHost = msg.host;
       dom.botRow.hidden = !msg.code || !msg.host;
@@ -384,6 +404,11 @@ function handle(msg: ServerMessage): void {
     }
 
     case 'match': {
+      if (isMiniGameId(msg.gameMode)) {
+        startLit(msg.gameMode, msg.players);
+        return;
+      }
+      endLit();
       scene.roster = new Map(
         msg.players.map((p) => [
           p.id,
@@ -416,6 +441,21 @@ function handle(msg: ServerMessage): void {
       renderer.configure(scene.baseSize);
       renderer.clearEffects();
       show(null);
+      return;
+    }
+
+    case 'mini': {
+      if (!lit || lit.kind !== msg.kind) return;
+      lit.round = msg.round;
+      lit.left = msg.left;
+      lit.players = msg.players;
+      lit.scores = msg.scores;
+      lit.extra = msg.extra;
+      const me = msg.players.find((p) => p.id === lit!.selfId);
+      // The server has the last word on where this fighter is; prediction only
+      // fills the gap between states.
+      lit.self = me && me.state === 'alive' ? { x: me.x, y: me.y, aim: lit.self?.aim ?? me.aim } : null;
+      litVelocity = litVelocityOf(msg.extra, lit.selfId);
       return;
     }
 
@@ -532,9 +572,9 @@ function handle(msg: ServerMessage): void {
       if (!scene.killcam && won) sfx.win();
       dom.resultStats.textContent = personalStats(msg.standings.find((s) => s.id === scene.selfId));
 
-      // Classic is won by surviving; the round modes by points.
-      const scored = msg.gameMode !== 'classic';
-      const modeName = MODE_NAMES[msg.gameMode];
+      // Classic and the lit games are won by surviving; the round modes by points.
+      const scored = msg.gameMode !== 'classic' && !isMiniGameId(msg.gameMode);
+      const modeName = gameModeName(msg.gameMode);
       dom.resultTitle.textContent = won ? 'Victory' : !champion ? 'Draw' : scored ? 'Defeat' : 'Eliminated';
       dom.resultTitle.className = won ? 'victory' : champion ? '' : 'draw';
       dom.resultDetail.textContent = scored
@@ -606,6 +646,139 @@ function handle(msg: ServerMessage): void {
  * Lights on: beams land, a hit-stop holds the frame, then the finishers go
  * off with the feed, the callout and the haptics.
  */
+
+/** Hand the screen to a lit game. */
+function startLit(kind: Parameters<typeof litRenderer.configure>[0], players: readonly LobbyPlayer[]): void {
+  lit = {
+    kind,
+    round: 0,
+    left: 0,
+    players: [],
+    scores: {},
+    extra: emptyExtra(kind),
+    selfId: scene.selfId,
+    roster: new Map(players.map((p) => [p.id, { color: rgb(p.color), name: p.name }])),
+    self: null,
+  };
+  litVelocity = null;
+  scene.inMatch = true;
+  scene.spectating = false;
+  countdownEndsAt = null;
+  clearTimeout(resultTimer);
+  resultPending = false;
+  litRenderer.configure(kind);
+  stage.hidden = true;
+  litStage.hidden = false;
+  music.setShowdown(false);
+  music.start();
+  show(null);
+}
+
+/** Give it back to the dark game. */
+function endLit(): void {
+  if (!lit) return;
+  lit = null;
+  litVelocity = null;
+  litStage.hidden = true;
+  stage.hidden = false;
+}
+
+/** A floor with nothing on it yet, until the first state arrives. */
+function emptyExtra(kind: MiniScene['kind']): MiniScene['extra'] {
+  switch (kind) {
+    case 'freeze':
+      return { kind, light: 'green', phaseLeft: 0, zaps: [] };
+    case 'collapse':
+      return { kind, tiles: solidFloor(), edge: 0, falls: [], broke: [], dashing: [] };
+    case 'rooms':
+      return {
+        kind,
+        phase: 'music',
+        phaseLeft: 0,
+        target: null,
+        rooms: Array.from({ length: ROOM_COUNT }, () => ({ open: true, locked: false, outcome: null })),
+      };
+    case 'sumo':
+      return {
+        kind,
+        floe: freshFloe(),
+        cracking: [],
+        vel: {},
+        charging: {},
+        cooldowns: {},
+        hits: [],
+        shoves: [],
+        bounces: [],
+        falls: [],
+        dashing: [],
+      };
+    case 'potato':
+      return { kind, holders: [], heat: [], passes: [], booms: [], cooldowns: {}, dashing: [] };
+  }
+}
+
+/** The momentum the server last reported for this fighter, if the game has any. */
+function litVelocityOf(extra: MiniScene['extra'], id: string): { x: number; y: number } | null {
+  if (extra.kind !== 'sumo') return null;
+  const v = extra.vel[id];
+  return v ? { x: v[0], y: v[1] } : null;
+}
+
+/**
+ * Where this fighter is between server states. Every game predicts with the
+ * same step the server runs, so the fighter answers the key immediately and
+ * still ends up where the server says it is.
+ */
+function predictLit(dt: number, dir: { x: number; y: number }): void {
+  const at = lit?.self;
+  if (!lit || !at) return;
+  switch (lit.extra.kind) {
+    case 'freeze': {
+      const next = stepFreeze(at, dir.x, dir.y, dt);
+      at.x = next.x;
+      at.y = next.y;
+      return;
+    }
+    case 'collapse': {
+      const next = stepCollapse(at, dir.x, dir.y, dt, MOVE_SPEED);
+      at.x = next.x;
+      at.y = next.y;
+      return;
+    }
+    case 'rooms': {
+      const next = stepRooms(at, dir.x, dir.y, dt, lit.extra);
+      at.x = next.x;
+      at.y = next.y;
+      return;
+    }
+    case 'potato': {
+      const next = stepPotato(at, dir.x, dir.y, dt, lit.extra.holders.includes(lit.selfId));
+      at.x = next.x;
+      at.y = next.y;
+      return;
+    }
+    case 'sumo': {
+      // Ice is momentum, not input: carry the last reported velocity forward.
+      if (!litVelocity) return;
+      at.x += litVelocity.x * dt;
+      at.y += litVelocity.y * dt;
+      return;
+    }
+  }
+}
+
+/** One frame of a lit game: steer, predict, draw. */
+function litFrame(now: number, dt: number): void {
+  if (!lit) return;
+  const dir = input.direction();
+  predictLit(dt, dir);
+  if (lit.self) {
+    const target = litRenderer.worldFromScreen(input.pointer.x, input.pointer.y);
+    lit.self.aim = Math.atan2(target.y - lit.self.y, target.x - lit.self.x);
+  }
+  litRenderer.frame(lit, now);
+}
+
 function reveal(msg: Extract<ServerMessage, { t: 'lights' }>, resolution: Resolution, now: number): void {
   renderer.reveal(now);
   sfx.clack();
@@ -789,6 +962,12 @@ function loop(now: number): void {
   const dt = Math.min((now - lastFrame) / 1000, 0.05);
   lastFrame = now;
 
+  if (lit) {
+    litFrame(now, dt);
+    requestAnimationFrame(loop);
+    return;
+  }
+
   // At the announced end the fighter freezes and its final position and aim go
   // out at once, so the shot that fires is exactly the one on screen.
   const frozen = scene.phase === 'dark' && now >= scene.darkEndsAt;
@@ -849,6 +1028,20 @@ function loop(now: number): void {
 }
 
 function sendInput(): void {
+  if (lit) {
+    const at = lit.self;
+    if (!at) return;
+    const dir = input.direction();
+    net.send({
+      t: 'input',
+      seq: prediction.record(at.x, at.y),
+      mx: dir.x,
+      my: dir.y,
+      aim: at.aim,
+      action: input.takeAction(),
+    });
+    return;
+  }
   if (scene.phase !== 'dark' || !scene.self) return;
   const dir = locked ? { x: 0, y: 0 } : input.direction();
   const { x, y, aim } = scene.self;

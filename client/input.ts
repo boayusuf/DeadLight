@@ -9,6 +9,9 @@ const AXES: Record<string, [number, number]> = {
   ArrowRight: [1, 0],
 };
 
+/** Keys that press the lit games' one button. */
+const ACTION_KEYS = new Set(['Space', 'ShiftLeft', 'ShiftRight', 'KeyJ']);
+
 /** How far the thumb travels for full speed, in CSS pixels. */
 const STICK_REACH = 46;
 /** How far the knob is drawn from centre, so it stays inside its base. */
@@ -33,6 +36,8 @@ function typing(target: EventTarget | null): boolean {
 export class Input {
   readonly pointer = { x: 0, y: 0 };
   private readonly held = new Set<string>();
+  /** The action button, held until whoever is listening takes it. */
+  private action = false;
 
   private stickId: number | null = null;
   private aimId: number | null = null;
@@ -44,6 +49,10 @@ export class Input {
   constructor(surface: HTMLElement) {
     addEventListener('keydown', (e) => {
       if (typing(e.target)) return;
+      if (ACTION_KEYS.has(e.code)) {
+        this.action = true;
+        e.preventDefault();
+      }
       if (e.code in AXES) {
         this.held.add(e.code);
         e.preventDefault();
@@ -52,6 +61,7 @@ export class Input {
     addEventListener('keyup', (e) => this.held.delete(e.code));
     addEventListener('blur', () => {
       this.held.clear();
+      this.action = false;
       this.release();
     });
 
@@ -61,10 +71,25 @@ export class Input {
     this.base.hidden = true;
     document.body.append(this.base);
 
+    this.attach(surface);
+  }
+
+  /** The lit games draw on their own canvas, which needs the same gestures. */
+  attach(surface: HTMLElement): void {
     surface.addEventListener('pointerdown', (e) => this.down(e));
     surface.addEventListener('pointermove', (e) => this.move(e));
     surface.addEventListener('pointerup', (e) => this.up(e));
     surface.addEventListener('pointercancel', (e) => this.up(e));
+  }
+
+  /**
+   * Whether the action button has been pressed since this was last asked.
+   * Taking it clears it, so one press is one dash however the frames fall.
+   */
+  takeAction(): boolean {
+    const pressed = this.action;
+    this.action = false;
+    return pressed;
   }
 
   /** Movement direction with a length of at most one, or zeroes when idle. */
@@ -106,6 +131,8 @@ export class Input {
     }
     if (this.aimId === null) {
       this.aimId = e.pointerId;
+      // On a touch screen the aiming half doubles as the action button.
+      this.action = true;
       this.aimAt(e);
     }
   }

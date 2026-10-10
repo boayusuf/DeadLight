@@ -30,7 +30,8 @@ body {
   text-transform: uppercase;
 }
 
-#stage {
+#stage,
+#lit-stage {
   position: fixed;
   top: 0;
   left: 0;
@@ -38,6 +39,11 @@ body {
   image-rendering: pixelated;
   /* The canvas owns every gesture: no scrolling, no pinch zoom mid-match. */
   touch-action: none;
+}
+
+/* Only one of the two stages is ever on screen: the dark game or a lit one. */
+#lit-stage[hidden] {
+  display: none;
 }
 
 /* --- Touch joystick, octagonal like the arena ------------------------ */

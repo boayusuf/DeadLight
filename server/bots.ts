@@ -11,15 +11,19 @@ import {
   type Segment,
   type World,
 } from '../shared/maps.js';
+import { isMiniGameId, type GameMode } from '../shared/games.js';
 import { onPath, type Leg, type ModeId, type Role } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { BotDifficulty, ServerMessage } from '../shared/protocol.js';
+import { MiniBrain } from './minibots.js';
 
 /** What a bot does this tick: the same three numbers a player's input carries. */
 export interface BotInput {
   mx: number;
   my: number;
   aim: number;
+  /** The lit games' one button. DeadLight has nothing to press. */
+  action?: boolean;
 }
 
 export const BOT_NAMES: readonly string[] = [
@@ -127,6 +131,8 @@ export class BotBrain {
   private contract: string | null = null;
   private path: readonly Leg[] | null = null;
   private move = STILL;
+  /** Set while the room is playing one of the lit games, which think differently. */
+  private mini: MiniBrain | null = null;
 
   constructor(
     readonly id: string,
@@ -140,6 +146,15 @@ export class BotBrain {
 
   /** Every server message sent to the bot's seat. */
   hear(msg: ServerMessage): void {
+    if (msg.t === 'match' && isMiniGameId(msg.gameMode)) {
+      this.mini = new MiniBrain(this.id, msg.gameMode, this.rng);
+      return;
+    }
+    if (this.mini) {
+      if (msg.t === 'over') this.mini = null;
+      else this.mini.hear(msg);
+      return;
+    }
     switch (msg.t) {
       case 'match':
         this.onMatch(msg.startCount, msg.map, msg.gameMode);
@@ -180,6 +195,7 @@ export class BotBrain {
 
   /** Called every server tick; the input to apply, or null to leave the last one standing. */
   think(now: number): BotInput | null {
+    if (this.mini) return this.mini.think();
     if (!this.alive || !this.dark) return null;
     if (this.darkStart === null) this.beginBlackout(now);
     const plan = this.plan;
@@ -191,8 +207,9 @@ export class BotBrain {
     return { ...this.move, aim: plan.aim };
   }
 
-  private onMatch(startCount: number, map: Parameters<typeof layoutFor>[0], mode: ModeId): void {
-    this.mode = mode;
+  private onMatch(startCount: number, map: Parameters<typeof layoutFor>[0], mode: GameMode): void {
+    this.mini = null;
+    this.mode = isMiniGameId(mode) ? 'classic' : mode;
     this.role = null;
     this.focus = null;
     this.contract = null;

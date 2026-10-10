@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_PLAYERS, PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
+import { FREEZE_FINISH_Y } from '../shared/freeze.js';
 import type { ServerMessage } from '../shared/protocol.js';
 import { Room, votesNeeded } from './room.js';
 
@@ -327,5 +328,92 @@ describe('Room modes', () => {
     expect(room.gameMode).toBe('classic');
     room.setMode('a', 'ghost');
     expect(room.gameMode).toBe('classic');
+  });
+});
+
+describe('Room with a lit game', () => {
+  const quiet = { send: (_: string) => {} };
+
+  /** A party of three, with the host playing one of the lit games. */
+  function party(mode: string): { room: Room; seen: ServerMessage[] } {
+    const seen: ServerMessage[] = [];
+    const room = new Room('ABCD');
+    room.join('a', 'A', { send: (raw) => seen.push(JSON.parse(raw)) });
+    room.join('b', 'B', quiet);
+    room.join('c', 'C', quiet);
+    room.setMode('a', mode);
+    room.requestStart('a', 1000);
+    return { room, seen };
+  }
+
+  function run(room: Room, ms: number, from = 1000): number {
+    let clock = from;
+    const until = clock + ms;
+    while (clock < until) {
+      clock += TICK_MS;
+      room.tick(clock, TICK_MS / 1000);
+      room.pushState();
+    }
+    return clock;
+  }
+
+  it('lets the host pick one of the lit games', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.setMode('a', 'sumo');
+    expect(room.gameMode).toBe('sumo');
+  });
+
+  it('still refuses a mode that is not a game at all', () => {
+    const room = new Room('ABCD');
+    room.join('a', 'A', quiet);
+    room.setMode('a', 'tiddlywinks');
+    expect(room.gameMode).toBe('classic');
+  });
+
+  it('starts the game the host picked and sends its state', () => {
+    const { room, seen } = party('potato');
+    const announced = seen.find((m) => m.t === 'match');
+    expect(announced?.t === 'match' && announced.gameMode).toBe('potato');
+    run(room, 200);
+    const state = seen.find((m) => m.t === 'mini');
+    expect(state?.t === 'mini' && state.kind).toBe('potato');
+    expect(state?.t === 'mini' && state.players).toHaveLength(3);
+  });
+
+  it('will not start a game the party is too small for', () => {
+    const seen: ServerMessage[] = [];
+    const room = new Room('ABCD');
+    room.join('a', 'A', { send: (raw) => seen.push(JSON.parse(raw)) });
+    room.join('b', 'B', quiet);
+    room.setMode('a', 'rooms');
+    room.requestStart('a', 1000);
+    expect(seen.some((m) => m.t === 'match')).toBe(false);
+    expect(room.match).toBeNull();
+  });
+
+  it('plays a lit game out and returns the room to its lobby', () => {
+    const { room, seen } = party('collapse');
+    run(room, 200_000);
+    expect(seen.some((m) => m.t === 'over' && m.gameMode === 'collapse')).toBe(true);
+    expect(room.match).toBeNull();
+  });
+
+  it('seats bots that know how to play it', () => {
+    const seen: ServerMessage[] = [];
+    const room = new Room('ABCD');
+    room.join('a', 'A', { send: (raw) => seen.push(JSON.parse(raw)) });
+    room.addBot('a', 'normal');
+    room.addBot('a', 'normal');
+    room.setMode('a', 'freeze');
+    room.requestStart('a', 1000);
+    run(room, 20_000);
+    const states = seen.filter((m) => m.t === 'mini');
+    expect(states.length).toBeGreaterThan(0);
+    // The bots run while the eye is away, so somebody has left the start line.
+    const last = states.at(-1);
+    const moved =
+      last?.t === 'mini' && last.players.some((p) => p.id !== 'a' && p.y > -FREEZE_FINISH_Y + 50);
+    expect(moved).toBe(true);
   });
 });

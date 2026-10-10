@@ -133,6 +133,7 @@ wss.on('connection', (socket: WebSocket) => {
           Number(msg.my) || 0,
           Number(msg.aim),
           msg.x === undefined || msg.y === undefined ? undefined : { x: Number(msg.x), y: Number(msg.y) },
+          msg.action === true,
         );
         return;
     }

@@ -9,11 +9,23 @@ import {
   type FinisherId,
 } from '../shared/constants.js';
 import { MAP_IDS, isMapChoice, type MapChoice, type MapId } from '../shared/maps.js';
-import { MODE_IDS, MODE_MIN_PLAYERS, isModeId, type ModeId } from '../shared/modes.js';
+import {
+  GAME_MIN_PLAYERS,
+  isMiniGameId,
+  type GameMode,
+  type MiniGameId,
+} from '../shared/games.js';
+import { MODE_IDS, MODE_MIN_PLAYERS, isModeId } from '../shared/modes.js';
 import type { BotDifficulty, LobbyPlayer, ServerMessage } from '../shared/protocol.js';
 import { BOT_NAMES, BotBrain } from './bots.js';
+import { CollapseMatch } from './collapse.js';
+import { FreezeMatch } from './freeze.js';
 import { Match } from './match.js';
+import { MiniMatch } from './mini.js';
+import { PotatoMatch } from './potato.js';
+import { RoomsMatch } from './rooms.js';
 import { RoundMatch } from './rounds.js';
+import { SumoMatch } from './sumo.js';
 
 const DIFFICULTIES: readonly BotDifficulty[] = ['easy', 'normal', 'hard'];
 
@@ -38,13 +50,13 @@ interface Member extends LobbyPlayer {
 
 export class Room {
   readonly members: Member[] = [];
-  match: Match | null = null;
+  match: Match | MiniMatch | null = null;
   emptySince: number | null = null;
 
   /** The arena for the next match; matchmaking always rolls one. */
   map: MapChoice = 'random';
   /** The mode for the next match. Hosts pick it; matchmaking takes each in turn. */
-  gameMode: ModeId = 'classic';
+  gameMode: GameMode = 'classic';
 
   private hostId: string | null = null;
   private countdownEndsAt: number | null = null;
@@ -114,14 +126,15 @@ export class Room {
   }
 
   setMode(requester: string, mode: unknown): void {
-    if (requester !== this.hostId || this.match || this.isPublic || !isModeId(mode)) return;
+    if (requester !== this.hostId || this.match || this.isPublic) return;
+    if (!isModeId(mode) && !isMiniGameId(mode)) return;
     this.gameMode = mode;
     this.sendLobby();
   }
 
   /** Whether the chosen mode can be played with everyone seated right now. */
   get modeFits(): boolean {
-    return this.members.length >= MODE_MIN_PLAYERS[this.gameMode];
+    return this.members.length >= minPlayersFor(this.gameMode);
   }
 
   setMap(requester: string, map: unknown): void {
@@ -232,7 +245,12 @@ export class Room {
     my: number,
     aim: number,
     report?: { x: number; y: number },
+    action?: boolean,
   ): void {
+    if (this.match instanceof MiniMatch) {
+      this.match.input(id, seq, mx, my, aim, report, undefined, action === true);
+      return;
+    }
     this.match?.input(id, seq, mx, my, aim, report);
   }
 
@@ -283,7 +301,13 @@ export class Room {
   private driveBots(now: number): void {
     for (const m of this.members) {
       const input = m.brain?.think(now);
-      if (input) this.match?.input(m.id, ++m.seq, input.mx, input.my, input.aim, undefined, now);
+      if (!input) continue;
+      const seq = ++m.seq;
+      if (this.match instanceof MiniMatch) {
+        this.match.input(m.id, seq, input.mx, input.my, input.aim, undefined, now, input.action === true);
+      } else {
+        this.match?.input(m.id, seq, input.mx, input.my, input.aim, undefined, now);
+      }
     }
   }
 
@@ -294,18 +318,23 @@ export class Room {
     this.countdownEndsAt = null;
     const map: MapId =
       this.map === 'random' ? MAP_IDS[Math.floor(Math.random() * MAP_IDS.length)]! : this.map;
-    // Matchmaking never strands a lobby on a mode it is too small for.
-    const mode = lineup.length >= MODE_MIN_PLAYERS[this.gameMode] ? this.gameMode : 'classic';
+    // Matchmaking never strands a lobby on a game it is too small for.
+    const mode = lineup.length >= minPlayersFor(this.gameMode) ? this.gameMode : 'classic';
     const send = (msg: ServerMessage, to?: string) => {
       if (msg.t === 'match') this.roster = msg;
       this.send(msg.t === 'over' ? { ...msg, wins: this.recordWin(msg.winner) } : msg, to);
     };
-    this.match = mode === 'classic' ? new Match(lineup, send, now, map) : new RoundMatch(lineup, send, now, map, mode);
+    this.match = isMiniGameId(mode)
+      ? startMini(mode, lineup, send, now, map)
+      : mode === 'classic'
+        ? new Match(lineup, send, now, map)
+        : new RoundMatch(lineup, send, now, map, mode);
   }
 
   /** Matchmaking plays the modes in turn, so every queue gets some variety. */
   private rotateMode(): void {
-    this.gameMode = MODE_IDS[(MODE_IDS.indexOf(this.gameMode) + 1) % MODE_IDS.length]!;
+    const at = isModeId(this.gameMode) ? MODE_IDS.indexOf(this.gameMode) : -1;
+    this.gameMode = MODE_IDS[(at + 1) % MODE_IDS.length]!;
   }
 
   /** Counts the win and returns the room's tally, for the result card. */
@@ -350,5 +379,31 @@ export class Room {
     for (const m of this.members) {
       if (to === undefined || m.id === to) m.conn.send(payload);
     }
+  }
+}
+
+/** Fewest fighters the chosen game needs, whichever family it belongs to. */
+function minPlayersFor(mode: GameMode): number {
+  return isMiniGameId(mode) ? GAME_MIN_PLAYERS[mode] : MODE_MIN_PLAYERS[mode];
+}
+
+function startMini(
+  kind: MiniGameId,
+  lineup: readonly LobbyPlayer[],
+  send: (msg: ServerMessage, to?: string) => void,
+  now: number,
+  map: MapId,
+): MiniMatch {
+  switch (kind) {
+    case 'freeze':
+      return new FreezeMatch(lineup, send, now, map);
+    case 'collapse':
+      return new CollapseMatch(lineup, send, now, map);
+    case 'rooms':
+      return new RoomsMatch(lineup, send, now, map);
+    case 'sumo':
+      return new SumoMatch(lineup, send, now, map);
+    case 'potato':
+      return new PotatoMatch(lineup, send, now, map);
   }
 }

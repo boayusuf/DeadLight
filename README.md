@@ -27,9 +27,12 @@ In a party, the host adds and removes bots and can kick players. Public
 matchmaking is people only; a player is removed if most of the others vote to
 kick them.
 
-## Modes
+## Games
 
-The host picks one in the lobby; public matchmaking plays them in turn.
+The host picks one in the lobby. Public matchmaking plays the DeadLight modes in
+turn; the lit games are a party pick.
+
+### DeadLight — played in the dark
 
 - **Classic** — the rules above. Last one standing wins.
 - **Hunted** — each round one player is the Target, held to a secret path (a line,
@@ -45,6 +48,29 @@ The host picks one in the lobby; public matchmaking plays them in turn.
 Every player takes the same number of turns as Target or Ghost, and the
 highest score wins. The server deals all roles and contracts and decides every
 point; each player is only sent their own.
+
+### The lit games
+
+No lasers and no blackout: the floor is lit, everyone can see everyone, and the
+arena is what takes you out. **WASD** to move, and one action button —
+**space**, **shift** or **J**, or a tap on the right half of a phone screen.
+Last one standing wins.
+
+- **Freeze** — a long corridor with an eye at the far end. Run while it is
+  turned away; move while it looks and you are gone. Last one over the line each
+  race is out.
+- **Collapse** — an eleven by eleven floor that breaks from the outside in.
+  Tiles crack, then shake, then are not there. Dash with the action button, and
+  remember the middle goes last.
+- **Rooms** — eight side rooms off a floor that spins to the music. A number is
+  called, the clock runs, and the doors lock: a room saves the fighters inside it
+  only if exactly that many got in. The dance floor saves nobody. Three minimum.
+- **Sumo** — a disc of ice that keeps cracking back in wedges. No weapons, just
+  momentum: the action button dashes, and a dash that lands sends someone
+  skating. Off the ice is out.
+- **Potato** — a live bomb, a short fuse, and pillars to lose people behind.
+  Touch someone to hand it over; hands stay too hot to take it back for a
+  moment. Holding it at the bang is out. Three minimum.
 
 ![A blackout: only your own fighter and laser are visible](docs/blackout.jpg)
 
@@ -72,7 +98,9 @@ The client can also go on Firebase Hosting, talking to that server:
 - **TypeScript** everywhere. A Node server using `ws`, a Canvas 2D client, and a
   `shared/` folder for the rules both sides use.
 - **The server is authoritative.** It moves every player and resolves each round
-  from a single snapshot taken the moment the lights come back.
+  from a single snapshot taken the moment the lights come back. The lit games run
+  the same way: the server owns the floor, the fuse and the ice, and the client
+  predicts only its own fighter — with the same step function the server uses.
 - **No wallhacks by design.** During a blackout a living player is only ever
   sent their own position, so there is nothing about opponents to read.
 - **Pixel art without assets.** The game draws into its own pixel buffer and
@@ -86,4 +114,5 @@ npm test
 ```
 
 Covers hit detection, movement, arena geometry, stage progression, latency
-handling, and a full match run through the server.
+handling, the five lit games' floors and physics, and a full match of each game
+run through the server.

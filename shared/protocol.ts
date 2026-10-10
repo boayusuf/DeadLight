@@ -1,4 +1,10 @@
 import type { FinisherId } from './constants.js';
+import type { CollapseExtra } from './collapse.js';
+import type { FreezeExtra } from './freeze.js';
+import type { GameMode, MiniGameId } from './games.js';
+import type { PotatoExtra } from './potato.js';
+import type { RoomsExtra } from './rooms.js';
+import type { SumoExtra } from './sumo.js';
 import type { MapChoice, MapId } from './maps.js';
 import type { ModeId, Role, RoundModeId, TargetPath } from './modes.js';
 import type { Resolution } from './resolve.js';
@@ -84,7 +90,17 @@ export type ClientMessage =
   /** Party host: remove someone. Matchmaking: vote to remove them, or take the vote back. */
   | { t: 'kick'; id: string }
   /** `seq` numbers each input so the server can say which ones it has applied. */
-  | { t: 'input'; seq: number; mx: number; my: number; aim: number; x?: number; y?: number }
+  /** `action` is the lit games' one button: a dash, a shove, a lunge. */
+  | {
+      t: 'input';
+      seq: number;
+      mx: number;
+      my: number;
+      aim: number;
+      x?: number;
+      y?: number;
+      action?: boolean;
+    }
   | { t: 'again' };
 
 export type ServerMessage
@@ -97,7 +113,7 @@ export type ServerMessage
       players: LobbyPlayer[];
       countdownMs: number | null;
       map: MapChoice;
-      gameMode: ModeId;
+      gameMode: GameMode;
       /** Matchmaking kick votes against each player, and the ones this player cast. */
       votes: Record<string, number>;
       voted: string[];
@@ -106,7 +122,7 @@ export type ServerMessage
     }
   /** You were removed from the room, by the host or by a vote. */
   | { t: 'kicked'; vote: boolean }
-  | { t: 'match'; players: LobbyPlayer[]; startCount: number; map: MapId; gameMode: ModeId }
+  | { t: 'match'; players: LobbyPlayer[]; startCount: number; map: MapId; gameMode: GameMode }
   /**
    * Round modes: everything public about the round. Sent as it starts, with
    * `outcome` null, and again as it ends.
@@ -158,6 +174,39 @@ export type ServerMessage
       rounds: number;
       standings: Standing[];
       wins: Record<string, number>;
-      gameMode: ModeId;
+      gameMode: GameMode;
+    }
+  /**
+   * The lit games, several times a second. Nothing is hidden in them, so every
+   * fighter's position goes to everyone, spectators included.
+   */
+  | {
+      t: 'mini';
+      kind: MiniGameId;
+      round: number;
+      /** Server clock this state was taken at, so effects can be aged. */
+      time: number;
+      /** Milliseconds left of whatever the game is counting down. */
+      left: number;
+      players: MiniPlayer[];
+      scores: Record<string, number>;
+      extra: MiniExtra;
     }
   | { t: 'err'; msg: string };
+
+/** A fighter in a lit game. Everyone can see everyone, so there is nothing to withhold. */
+export interface MiniPlayer {
+  id: string;
+  x: number;
+  y: number;
+  aim: number;
+  state: 'alive' | 'out';
+}
+
+/** Everything public about a lit game's floor, tagged by which game it is. */
+export type MiniExtra =
+  | ({ kind: 'freeze' } & FreezeExtra)
+  | ({ kind: 'collapse' } & CollapseExtra)
+  | ({ kind: 'rooms' } & RoomsExtra)
+  | ({ kind: 'sumo' } & SumoExtra)
+  | ({ kind: 'potato' } & PotatoExtra);
