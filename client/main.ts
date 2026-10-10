@@ -95,11 +95,8 @@ const dom = {
   finisherPicks: el('lobby-finishers'),
   finisherPreview: el<HTMLCanvasElement>('finisher-preview'),
   btnMusic: el<HTMLButtonElement>('btn-music'),
-  modeName: el('mode-name'),
   modeBlurb: el('mode-blurb'),
-  modeSection: el('mode-section'),
   gamePicks: el('game-picks'),
-  gameBlurb: el('game-blurb'),
   lobbyGame: el('lobby-game'),
   lobbyGames: el('lobby-games'),
   tabs: el('lobby-tabs'),
@@ -317,8 +314,6 @@ const GAME_CHOICES: Pick[] = [...PICKABLE];
 let wanted: Pick = 'classic';
 
 const pickName = (pick: Pick): string => (pick === 'mix' ? 'Mix' : gameModeName(pick));
-const pickBlurb = (pick: Pick): string =>
-  pick === 'mix' ? 'A different game every round.' : gameModeBlurb(pick);
 
 /** A card on the menu: the game's own picture over its name. */
 const gameCards = GAME_CHOICES.map((game) => {
@@ -455,7 +450,6 @@ function announceGame(msg: Extract<ServerMessage, { t: 'session' }>, now: number
 /** The menu picker shows what this player will ask for. */
 function showWanted(): void {
   for (const card of gameCards) card.button.classList.toggle('mine', card.game === wanted);
-  dom.gameBlurb.textContent = pickBlurb(wanted);
 }
 
 
@@ -471,11 +465,11 @@ function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
 
   const name = pickName(game);
   dom.lobbyGame.textContent = party ? name : `Next: ${name}`;
+  // The picks speak for themselves; only a game the room is too small for
+  // needs a line of its own, so the grid above it stays square.
   const short = game !== 'mix' && seated < gameModeMinPlayers(game);
-  dom.modeBlurb.textContent = short ? `Needs ${gameModeMinPlayers(game)} fighters or more.` : pickBlurb(game);
-  dom.modeBlurb.classList.toggle('warn', short);
-  dom.modeSection.hidden = false;
-  dom.modeName.textContent = name;
+  dom.modeBlurb.hidden = !short;
+  dom.modeBlurb.textContent = short ? `Needs ${gameModeMinPlayers(game)} fighters or more.` : '';
   // A party's host decides; in a queue, anyone waiting may change it.
   const mayPick = party ? host : true;
   for (const pick of gamePicks) {
@@ -521,7 +515,11 @@ function showFinisher(): void {
 }
 
 function showMusic(): void {
-  dom.btnMusic.textContent = `Music ${music.muted ? 'off' : 'on'} \u00b7 M`;
+  // The button carries a drawn note, so its state goes on the button itself.
+  dom.btnMusic.setAttribute('aria-pressed', String(!music.muted));
+  dom.btnMusic.setAttribute('aria-label', music.muted ? 'Music off' : 'Music on');
+  dom.btnMusic.title = `Music ${music.muted ? 'off' : 'on'} · M`;
+  if (!dom.btnMusic.contains(musicPixel)) dom.btnMusic.replaceChildren(musicPixel);
 }
 
 /** One button per colour, each showing the fighter that colour belongs to. */

@@ -152,6 +152,29 @@ setInterval(() => {
 
 setInterval(() => lobby.pushState(), 1000 / BROADCAST_HZ);
 
+/**
+ * Free hosting puts a service to sleep once nothing has reached it for a
+ * quarter of an hour, and waking it takes long enough that whoever opens the
+ * game first sits watching a blank page. So the server knocks on its own front
+ * door every few minutes: the request goes out through the public address and
+ * comes back in as ordinary traffic, which is all the host is watching for.
+ *
+ * Only runs where the host tells us our own address, so it does nothing in
+ * development.
+ */
+const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL ?? process.env.PUBLIC_URL;
+const KEEPALIVE_MS = 10 * 60 * 1000;
+
+function stayAwake(): void {
+  if (!PUBLIC_URL) return;
+  setInterval(() => {
+    // Nothing to do with the answer: the request itself is the point.
+    fetch(PUBLIC_URL, { method: 'HEAD' }).catch(() => undefined);
+  }, KEEPALIVE_MS).unref();
+  console.log(`keeping ${PUBLIC_URL} awake every ${KEEPALIVE_MS / 60000} minutes`);
+}
+
 http.listen(PORT, () => {
   console.log(`deadlight server listening on :${PORT} (tick ${TICK_HZ}Hz)`);
+  stayAwake();
 });

@@ -856,6 +856,12 @@ h1 {
 
 
 /* --- The card between games ------------------------------------------ */
+/* A line that only appears when something is wrong, so it reads as a warning. */
+.sub.warn {
+  color:var(--amber)}
+.sub[hidden] {
+  display:none}
+
 #intro {
   position:fixed;
   inset:0;
