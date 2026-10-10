@@ -1,17 +1,17 @@
-import { spawnsFor, type MapId } from '../shared/maps.js';
+import { openWorld, spawnsFor, type MapId } from '../shared/maps.js';
 import {
   CONTRACT_KILLS,
   ROUND_CYCLES,
   dealContracts,
+  huntLine,
   nextFocus,
-  pathStart,
-  pickPath,
+  pickZone,
   roundCount,
   shuffle,
-  type Leg,
+  zoneStart,
   type Role,
   type RoundModeId,
-  type TargetPath,
+  type Zone,
 } from '../shared/modes.js';
 import type { Brief, LobbyPlayer, RoundOutcome, Standing } from '../shared/protocol.js';
 import { resolveRound, type Resolution } from '../shared/resolve.js';
@@ -49,7 +49,7 @@ export class RoundMatch extends Match {
   private roundOver = false;
 
   private focus: string | null = null;
-  private path: TargetPath | null = null;
+  private zone: Zone | null = null;
   private roles = new Map<string, Role>();
   private contracts = new Map<string, string>();
   private previousContracts = new Map<string, string>();
@@ -92,8 +92,13 @@ export class RoundMatch extends Match {
     return this.scores.get(id) ?? 0;
   }
 
-  protected override pathOf(p: MatchPlayer): readonly Leg[] | null {
-    return this.mode === 'hunted' && p.id === this.focus && this.path ? this.path.legs : null;
+  protected override zoneOf(p: MatchPlayer): Zone | null {
+    return this.mode === 'hunted' && p.id === this.focus ? this.zone : null;
+  }
+
+  /** Hunted's line stands still: a hunter has an aim and nothing else. */
+  protected override canMove(p: MatchPlayer): boolean {
+    return this.mode !== 'hunted' || p.id === this.focus;
   }
 
   /** After a decisive reveal, the next "blackout" is the next round instead. */
@@ -133,6 +138,7 @@ export class RoundMatch extends Match {
       round: this.roundIndex,
       rounds: this.rounds,
       focus: this.focus,
+      ...(this.zone ? { zone: this.zone } : {}),
       scores: Object.fromEntries(this.scores),
       outcome: null,
     });
@@ -159,7 +165,7 @@ export class RoundMatch extends Match {
     const ids = playing.map((p) => p.id);
     this.roles = new Map();
     this.focus = null;
-    this.path = null;
+    this.zone = null;
 
     if (this.mode === 'assassin') {
       this.contracts = dealContracts(ids, this.previousContracts, this.rng);
@@ -173,13 +179,42 @@ export class RoundMatch extends Match {
     this.focus = nextFocus(this.order, this.turns, (id) => ids.includes(id));
     if (this.focus) this.turns.set(this.focus, (this.turns.get(this.focus) ?? 0) + 1);
     for (const id of ids) this.roles.set(id, id === this.focus ? (this.mode === 'hunted' ? 'target' : 'ghost') : 'hunter');
-    if (this.mode === 'hunted') this.path = pickPath(this.world, this.rng);
+    if (this.mode === 'hunted') {
+      // A shooting gallery, not a maze: the gallery is cleared of cover so the
+      // box is the only thing between the line and the Target.
+      this.world.layout = openWorld(this.size).layout;
+      this.world.broken.clear();
+      this.zone = pickZone(this.world, this.rng);
+    }
   }
 
   private place(playing: readonly MatchPlayer[], now: number): void {
+    if (this.mode === 'hunted' && this.zone) {
+      const hunters = playing.filter((p) => p.id !== this.focus);
+      const line = huntLine(hunters.length, this.world, this.zone);
+      hunters.forEach((p, i) => {
+        const spot = line[i]!;
+        p.x = spot.x;
+        p.y = spot.y;
+        p.aim = spot.aim;
+        p.anchor = { x: spot.x, y: spot.y, at: now };
+        p.onPad = null;
+      });
+      const target = playing.find((p) => p.id === this.focus);
+      if (target) {
+        const spot = zoneStart(this.zone);
+        target.x = spot.x;
+        target.y = spot.y;
+        target.aim = Math.PI / 2;
+        target.anchor = { x: spot.x, y: spot.y, at: now };
+        target.onPad = null;
+      }
+      return;
+    }
+
     const spawns = spawnsFor(playing.length, this.world, this.rng() * Math.PI * 2);
     playing.forEach((p, i) => {
-      const spot = p.id === this.focus && this.path ? pathStart(this.path) : spawns[i]!;
+      const spot = spawns[i]!;
       p.x = spot.x;
       p.y = spot.y;
       // Face the middle; a Target on its path faces along it.
@@ -196,7 +231,8 @@ export class RoundMatch extends Match {
     this.cycle++;
 
     const contenders = this.players.filter((p) => p.alive);
-    const unarmed = new Set(this.mode === 'ghost' && this.focus ? [this.focus] : []);
+    // Neither the Ghost nor the Target carries a weapon: both only dodge.
+    const unarmed = new Set(this.focus && this.mode !== 'assassin' ? [this.focus] : []);
     const resolution = resolveRound(contenders, this.world, unarmed);
     for (const id of resolution.broken) this.world.broken.add(id);
 
@@ -252,6 +288,7 @@ export class RoundMatch extends Match {
         round: this.roundIndex,
         rounds: this.rounds,
         focus: this.focus,
+        ...(this.zone ? { zone: this.zone } : {}),
         scores: Object.fromEntries(this.scores),
         outcome,
       });
@@ -310,18 +347,14 @@ export class RoundMatch extends Match {
           winners.add(kill.shooter);
           credited.push(kill);
         }
-      } else if (this.mode === 'hunted' && kill.shooter === focus) {
-        // The Target shooting back: that hunter is out for the rest of the round.
-        eliminated.add(kill.target);
-        credited.push(kill);
       }
-      // Hunters hitting hunters do nothing: they are on the same side.
+      // Hunters hitting hunters do nothing: they are on the same side, and the
+      // Target has nothing to shoot back with.
     }
 
     if (eliminated.has(focus)) {
       return { eliminated, credited, outcome: { kind: 'caught', focus, winners: [...winners] } };
     }
-    // With every hunter down there is nobody left to catch the Target.
     const hunters = contenders.filter((p) => p.id !== focus && !eliminated.has(p.id));
     if (hunters.length === 0) return { eliminated, credited, outcome: { kind: 'escaped', focus } };
     return { eliminated, credited, outcome: null };
@@ -369,7 +402,6 @@ export class RoundMatch extends Match {
         status: this.status.get(id) ?? 'failed',
       };
     }
-    if (role === 'target' && this.path) return { role, path: this.path };
     return { role };
   }
 

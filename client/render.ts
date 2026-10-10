@@ -11,7 +11,7 @@ import {
   STAGE_SCALE,
 } from '../shared/constants.js';
 import type { FinisherId } from '../shared/constants.js';
-import { CONTRACT_KILLS, MODE_NAMES, PATH_NAMES, ROUND_CYCLES, type Leg, type ModeId } from '../shared/modes.js';
+import { CONTRACT_KILLS, MODE_NAMES, ROUND_CYCLES, type ModeId, type Zone } from '../shared/modes.js';
 import type { Brief, ReplayTrack, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
 import { killerOf } from './callouts.js';
@@ -539,7 +539,8 @@ export class Renderer {
     if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'floor');
     this.drawScorches(scene, size, lit);
     if (scene.inMatch) this.drawObstacles(scene.world, light, now, 'solid');
-    if (scene.inMatch && scene.brief?.path && scene.self) this.drawTargetPath(scene.brief.path.legs, lit, now);
+    const zone = scene.round?.info.zone;
+    if (scene.inMatch && zone) this.drawHuntZone(zone, lit, now);
 
     if (scene.inMatch) {
       if (lit) this.drawLitRound(scene, size, now);
@@ -883,6 +884,7 @@ export class Renderer {
           walking: false,
           alpha: ghostly ? 0.5 : 1,
           rim: ghostly ? 0.35 : undefined,
+          unarmed: this.isUnarmed(scene, shown.id),
         });
         this.drawRoleMark(scene, player, now);
         continue;
@@ -893,6 +895,7 @@ export class Renderer {
         walking: false,
         dissolve: dying,
         whiten: dying < 0.18 ? 1 : 0,
+        unarmed: this.isUnarmed(scene, shown.id),
       });
     }
   }
@@ -914,6 +917,7 @@ export class Renderer {
         walking: this.moving,
         alpha: ghostly ? 0.5 : 1,
         rim: ghostly ? 0.35 : undefined,
+        unarmed: this.isUnarmed(scene, scene.selfId),
       });
       return;
     }
@@ -1029,7 +1033,15 @@ export class Renderer {
     player: SnapshotPlayer,
     fighter: Fighter,
     now: number,
-    opts: { walking: boolean; alpha?: number; rim?: number; dissolve?: number; whiten?: number },
+    opts: {
+      walking: boolean;
+      alpha?: number;
+      rim?: number;
+      dissolve?: number;
+      whiten?: number;
+      /** Ghosts and Targets carry nothing, so nothing is drawn in their hands. */
+      unarmed?: boolean;
+    },
   ): void {
     const buffer = this.buffer;
     const cx = this.px(player.x);
@@ -1061,7 +1073,7 @@ export class Renderer {
       whiten: opts.whiten,
     });
 
-    this.drawWeapon(player, fighter, cx, cy + bob + breath, alpha);
+    if (!opts.unarmed) this.drawWeapon(player, fighter, cx, cy + bob + breath, alpha);
   }
 
   /**
@@ -1256,27 +1268,43 @@ export class Renderer {
     return scene.mode === 'ghost' && scene.round?.info.focus === id;
   }
 
+  /** Who is holding nothing this round: the Ghost, and Hunted's Target. */
+  private isUnarmed(scene: Scene, id: string): boolean {
+    if (!scene.round) return false;
+    return (scene.mode === 'ghost' || scene.mode === 'hunted') && scene.round.info.focus === id;
+  }
+
   /**
-   * The Target's path, drawn only for the Target: a run of amber floor
-   * markings, bright enough to follow in the dark.
+   * The box the Target is penned into. Everyone sees it: the hunters are
+   * firing into it blind, and the Target is dodging inside it.
    */
-  private drawTargetPath(legs: readonly Leg[], lit: boolean, now: number): void {
+  private drawHuntZone(zone: Zone, lit: boolean, now: number): void {
     const buffer = this.buffer;
-    const alpha = lit ? 0.55 : 0.4;
+    const alpha = lit ? 0.5 : 0.38;
+    const left = this.px(zone.x - zone.w / 2);
+    const right = this.px(zone.x + zone.w / 2);
+    const top = this.py(zone.y - zone.h / 2);
+    const bottom = this.py(zone.y + zone.h / 2);
     const crawl = Math.floor(now / 90) % 6;
-    for (const leg of legs) {
-      const x0 = this.px(leg.ax);
-      const y0 = this.py(leg.ay);
-      const x1 = this.px(leg.bx);
-      const y1 = this.py(leg.by);
-      const steps = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0)));
-      for (let i = 0; i <= steps; i++) {
-        // Dashes that creep along the path, so it reads as a route, not a wall.
-        if ((i + crawl) % 6 > 3) continue;
-        buffer.blend(Math.round(lerp(x0, x1, i / steps)), Math.round(lerp(y0, y1, i / steps)), AMBER, alpha);
-      }
-      buffer.rect(x0 - 1, y0 - 1, 3, 3, AMBER, alpha);
-      buffer.rect(x1 - 1, y1 - 1, 3, 3, AMBER, alpha);
+
+    // Dashes that creep round the box, so it reads as a pen rather than a wall.
+    for (let x = left; x <= right; x++) {
+      if ((x + crawl) % 6 > 3) continue;
+      buffer.blend(x, top, AMBER, alpha);
+      buffer.blend(x, bottom, AMBER, alpha);
+    }
+    for (let y = top; y <= bottom; y++) {
+      if ((y + crawl) % 6 > 3) continue;
+      buffer.blend(left, y, AMBER, alpha);
+      buffer.blend(right, y, AMBER, alpha);
+    }
+    for (const [x, y] of [
+      [left, top],
+      [right, top],
+      [left, bottom],
+      [right, bottom],
+    ] as const) {
+      buffer.rect(x - 1, y - 1, 3, 3, AMBER, alpha);
     }
   }
 
@@ -1397,12 +1425,12 @@ export class Renderer {
       const name = brief?.contract ? (scene.roster.get(brief.contract)?.name ?? '').toUpperCase() : '';
       return [`TARGET: ${name}`, `OR ANY ${CONTRACT_KILLS} OTHERS`, HAZARD];
     }
-    if (brief?.role === 'target' && brief.path) {
-      return ['YOU ARE HUNTED', `PATH: ${PATH_NAMES[brief.path.shape].toUpperCase()}`, AMBER];
+    if (brief?.role === 'target') {
+      return ['YOU ARE HUNTED', 'NO WEAPON. STAY OUT OF THE SHOTS.', AMBER];
     }
     if (brief?.role === 'ghost') return ['YOU ARE THE GHOST', 'NO WEAPON. THEY CANNOT SEE YOU.', AMBER];
     if (scene.mode === 'ghost') return [`FIND ${focusName}`, 'IT VANISHES WHEN THE LIGHTS GO', PALE];
-    return [`HUNT ${focusName}`, 'THE TARGET IS HELD TO A PATH', PALE];
+    return [`HUNT ${focusName}`, 'FIRE INTO THE BOX. HOLD THE LINE.', PALE];
   }
 
   private resultLines(scene: Scene): [string, string, number] {

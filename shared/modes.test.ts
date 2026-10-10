@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { PLAYER_RADIUS } from './constants.js';
-import { MAP_IDS, collide, layoutFor, openWorld } from './maps.js';
+import { openWorld } from './maps.js';
 import {
   MODE_IDS,
-  PATH_SHAPES,
+  clampToZone,
   dealContracts,
+  huntLine,
+  insideZone,
   nextFocus,
-  onPath,
-  pickPath,
+  pickZone,
   roundCount,
-  walkable,
+  zoneStart,
 } from './modes.js';
 
 /** A seeded generator, so random-looking tests are repeatable. */
@@ -83,48 +84,56 @@ describe('dealContracts', () => {
   });
 });
 
-describe('Hunted paths', () => {
-  it('only produces paths a fighter can walk, on every map', () => {
-    for (const map of MAP_IDS) {
-      const world = { size: 880, layout: layoutFor(map, 880), broken: new Set<string>() };
-      for (let seed = 1; seed < 25; seed++) {
-        const path = pickPath(world, seeded(seed));
-        expect(PATH_SHAPES).toContain(path.shape);
-        expect(walkable(path.legs, world)).toBe(true);
-      }
+describe('the hunting ground', () => {
+  const world = openWorld(880);
+
+  it('pens the Target in a box inside the arena, up the far end', () => {
+    for (let seed = 1; seed < 40; seed++) {
+      const zone = pickZone(world, seeded(seed));
+      expect(zone.y).toBeLessThan(0);
+      expect(zone.w).toBeGreaterThan(PLAYER_RADIUS * 4);
+      expect(zone.h).toBeGreaterThan(PLAYER_RADIUS * 2);
+      expect(Math.abs(zone.x) + zone.w / 2).toBeLessThanOrEqual(world.size / 2);
     }
   });
 
-  it('keeps every leg straight along an axis or a clean diagonal', () => {
-    const world = openWorld(880);
-    for (let seed = 1; seed < 60; seed++) {
-      for (const leg of pickPath(world, seeded(seed)).legs) {
-        const dx = Math.abs(leg.bx - leg.ax);
-        const dy = Math.abs(leg.by - leg.ay);
-        expect(dx < 1e-6 || dy < 1e-6 || Math.abs(dx - dy) < 1e-6 || Math.abs(dx - 2 * dy) < 1e-6 || Math.abs(dy - 2 * dx) < 1e-6).toBe(true);
-      }
+  it('starts the Target in the middle of its own box', () => {
+    const zone = pickZone(world, seeded(3));
+    const start = zoneStart(zone);
+    expect(insideZone(start, zone)).toBe(true);
+    expect(start).toEqual({ x: zone.x, y: zone.y });
+  });
+
+  it('pushes anything outside the box back inside it', () => {
+    const zone = { x: 0, y: -200, w: 400, h: 160 };
+    const out = clampToZone({ x: 9000, y: 0 }, zone);
+    expect(insideZone(out, zone)).toBe(true);
+    expect(out.x).toBeCloseTo(200 - PLAYER_RADIUS, 6);
+    expect(out.y).toBeCloseTo(-200 + 80 - PLAYER_RADIUS, 6);
+  });
+
+  it('leaves a fighter already inside the box exactly where it is', () => {
+    const zone = { x: 0, y: -200, w: 400, h: 160 };
+    const at = { x: 30, y: -210 };
+    expect(clampToZone(at, zone)).toEqual(at);
+  });
+
+  it('lines the hunters up across the near end, all facing the box', () => {
+    const zone = pickZone(world, seeded(7));
+    const line = huntLine(5, world, zone);
+    expect(line).toHaveLength(5);
+    for (const spot of line) {
+      expect(spot.y).toBeGreaterThan(0);
+      expect(insideZone(spot, zone)).toBe(false);
+      // Facing the box means aiming up the arena, which is a negative y step.
+      expect(Math.sin(spot.aim)).toBeLessThan(0);
     }
+    const xs = line.map((spot) => spot.x);
+    expect([...xs].sort((a, b) => a - b)).toEqual(xs);
   });
 
-  it('snaps any position back onto the path', () => {
-    const legs = [{ ax: -100, ay: 0, bx: 100, by: 0 }];
-    expect(onPath({ x: 40, y: 90 }, legs)).toEqual({ x: 40, y: 0 });
-    expect(onPath({ x: 400, y: -30 }, legs)).toEqual({ x: 100, y: 0 });
-  });
-
-  it('turns corners by sliding onto the next leg', () => {
-    const legs = [
-      { ax: 0, ay: 0, bx: 100, by: 0 },
-      { ax: 100, ay: 0, bx: 100, by: 100 },
-    ];
-    expect(onPath({ x: 110, y: 60 }, legs)).toEqual({ x: 100, y: 60 });
-  });
-
-  it('starts the target somewhere it can actually stand', () => {
-    const world = openWorld(880);
-    const path = pickPath(world, seeded(3));
-    const leg = path.legs[0]!;
-    const start = { x: (leg.ax + leg.bx) / 2, y: (leg.ay + leg.by) / 2 };
-    expect(collide(start, PLAYER_RADIUS, world)).toEqual(start);
+  it('stands a lone hunter in the middle of the line', () => {
+    const zone = pickZone(world, seeded(9));
+    expect(huntLine(1, world, zone)[0]!.x).toBe(0);
   });
 });

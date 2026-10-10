@@ -6,7 +6,7 @@ import type { PotatoExtra } from './potato.js';
 import type { RoomsExtra } from './rooms.js';
 import type { SumoExtra } from './sumo.js';
 import type { MapChoice, MapId } from './maps.js';
-import type { ModeId, Role, RoundModeId, TargetPath } from './modes.js';
+import type { ModeId, Role, RoundModeId, Zone } from './modes.js';
 import type { Resolution } from './resolve.js';
 
 export interface LobbyPlayer {
@@ -47,8 +47,6 @@ export type RoundOutcome =
 /** What one fighter alone is told about their part in the round. */
 export interface Brief {
   role: Role;
-  /** Hunted, to the Target only: the path they are held to. */
-  path?: TargetPath;
   /** Assassin, to its owner only: who they are hunting and how far along they are. */
   contract?: string;
   progress?: number;
@@ -141,6 +139,8 @@ export type ServerMessage
       rounds: number;
       /** The Target or Ghost; null in Assassin, where every target is private. */
       focus: string | null;
+      /** Hunted: the box the Target is penned into, which everyone can see. */
+      zone?: Zone;
       scores: Record<string, number>;
       outcome: RoundOutcome | null;
     }

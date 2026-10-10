@@ -9,7 +9,7 @@ import {
   type MapId,
   type World,
 } from '../shared/maps.js';
-import { onPath, type Leg } from '../shared/modes.js';
+import { clampToZone, type Zone } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import {
   BLACKOUT_MAX_MS,
@@ -170,10 +170,16 @@ export class Match {
     p.seq = Math.max(p.seq, seq);
     if (Number.isFinite(aim)) p.aim = aim;
 
+    // A fighter who cannot move this round has nothing to report.
+    if (!this.canMove(p)) {
+      p.mx = 0;
+      p.my = 0;
+      return;
+    }
     if (!report || !Number.isFinite(report.x) || !Number.isFinite(report.y)) return;
     const free = collide(report, PLAYER_RADIUS, this.world);
-    const path = this.pathOf(p);
-    const inside = path ? onPath(free, path) : free;
+    const pen = this.zoneOf(p);
+    const inside = pen ? clampToZone(free, pen) : free;
     const speed = MOVE_SPEED + maxDrift(this.world.layout);
     const reach = ((speed * Math.max(0, now - p.anchor.at)) / 1000) * REPORT_TOLERANCE + REPORT_SLACK;
     if (Math.hypot(inside.x - p.anchor.x, inside.y - p.anchor.y) > reach) return;
@@ -238,20 +244,27 @@ export class Match {
     });
   }
 
-  /** The path a fighter is held to, if any: Hunted's Target. */
-  protected pathOf(_p: MatchPlayer): readonly Leg[] | null {
+  /** The box a fighter is penned into, if any: Hunted's Target. */
+  protected zoneOf(_p: MatchPlayer): Zone | null {
     return null;
+  }
+
+  /** Whether a fighter may move at all this round: Hunted's line may not. */
+  protected canMove(_p: MatchPlayer): boolean {
+    return true;
   }
 
   private move(now: number, dt: number): void {
     for (const p of this.players) {
       // Belts drag everyone still standing, input or not, connected or not.
       if (!p.alive) continue;
+      if (!this.canMove(p)) continue;
       const moved = stepPlayer(p, p.mx, p.my, dt, this.world);
-      const path = this.pathOf(p);
-      if (path) {
-        // A fighter on a path slides along it and never takes a teleporter off it.
-        const held = onPath(moved, path);
+      const pen = this.zoneOf(p);
+      if (pen) {
+        // A penned fighter slides along the wall of its box and never takes a
+        // teleporter out of it.
+        const held = clampToZone(moved, pen);
         p.x = held.x;
         p.y = held.y;
         continue;

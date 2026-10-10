@@ -531,6 +531,26 @@ li .kick {
   cursor:pointer}
 li .kick:hover {
   color:var(--red)}
+/* Matchmaking's kick is a vote, so it says how the vote stands. */
+li .vote {
+  flex:none;
+  margin-left:6px;
+  padding:4px 8px;
+  font:inherit;
+  font-size:10px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--metal-light);
+  background:var(--raise);
+  border:2px solid var(--metal);
+  cursor:pointer}
+li .vote:hover {
+  color:var(--pale);
+  border-color:var(--pale)}
+li .vote.mine {
+  color:var(--void);
+  background:var(--red);
+  border-color:var(--red)}
 .bots {
   display:grid;
   grid-template-columns:1fr 1fr;

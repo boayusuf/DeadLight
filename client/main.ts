@@ -39,7 +39,7 @@ import {
   type GameChoice,
   type GameMode,
 } from '../shared/games.js';
-import { MODE_IDS, onPath } from '../shared/modes.js';
+import { MODE_IDS, clampToZone } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { LobbyPlayer, ServerMessage, SessionSetup, Standing } from '../shared/protocol.js';
 import type { Resolution } from '../shared/resolve.js';
@@ -718,6 +718,8 @@ function handle(msg: ServerMessage): void {
     case 'round':
       scene.round = { info: msg, at: performance.now() };
       if (!msg.outcome) scene.cycle = 0;
+      // Hunted clears the floor: a gallery has the box and nothing else in it.
+      if (msg.zone) scene.world = { ...scene.world, layout: openWorld(scene.world.size).layout, broken: new Set() };
       return;
 
     case 'brief':
@@ -1213,9 +1215,10 @@ function loop(now: number): void {
   if (scene.phase === 'dark' && scene.lights) {
     if (scene.self && !frozen) {
       const free = stepPlayer(scene.self, dir.x, dir.y, dt, scene.world);
-      const path = scene.brief?.role === 'target' ? scene.brief.path?.legs : undefined;
-      const moved = path ? onPath(free, path) : free;
-      const jump = path ? { ...moved, onPad, jumped: false } : teleportStep(moved, scene.world, onPad);
+      // The Target is penned into the box and never leaves it, locally either.
+      const pen = scene.brief?.role === 'target' ? scene.round?.info.zone : undefined;
+      const moved = pen ? clampToZone(free, pen) : free;
+      const jump = pen ? { ...moved, onPad, jumped: false } : teleportStep(moved, scene.world, onPad);
       onPad = jump.onPad;
       if (jump.jumped) {
         renderer.teleported(moved, jump, scene.roster.get(scene.selfId)?.color ?? 0xccd6e2, now);

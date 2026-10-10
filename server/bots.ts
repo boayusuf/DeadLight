@@ -12,7 +12,7 @@ import {
   type World,
 } from '../shared/maps.js';
 import { isMiniGameId, type GameMode } from '../shared/games.js';
-import { onPath, type Leg, type ModeId, type Role } from '../shared/modes.js';
+import { clampToZone, insideZone, type ModeId, type Role, type Zone } from '../shared/modes.js';
 import { stepPlayer } from '../shared/movement.js';
 import type { BotDifficulty, ServerMessage } from '../shared/protocol.js';
 import { MiniBrain } from './minibots.js';
@@ -129,7 +129,8 @@ export class BotBrain {
   private role: Role | null = null;
   private focus: string | null = null;
   private contract: string | null = null;
-  private path: readonly Leg[] | null = null;
+  /** Hunted: the box the Target is penned into, which the whole line can see. */
+  private zone: Zone | null = null;
   private move = STILL;
   /** Set while the room is playing one of the lit games, which think differently. */
   private mini: MiniBrain | null = null;
@@ -172,11 +173,11 @@ export class BotBrain {
       case 'round':
         this.mode = msg.mode;
         this.focus = msg.focus;
+        this.zone = msg.zone ?? null;
         break;
       case 'brief':
         this.role = msg.brief.role;
         this.contract = msg.brief.contract ?? null;
-        this.path = msg.brief.path?.legs ?? null;
         break;
       case 'self':
         if (this.dark) {
@@ -213,7 +214,7 @@ export class BotBrain {
     this.role = null;
     this.focus = null;
     this.contract = null;
-    this.path = null;
+    this.zone = null;
     const size = arenaSize(startCount, 0);
     this.world = { size, layout: layoutFor(map, size), broken: new Set() };
     this.alive = true;
@@ -267,8 +268,9 @@ export class BotBrain {
     this.move = STILL;
     const reach = Math.max(0, ((this.durationMs - MOVE_MARGIN_MS) / 1000) * MOVE_SPEED * REACH_EFFICIENCY);
     const chosen = this.chooseSpot(reach);
-    // A Target can only end up somewhere on its path, so it plans to be there.
-    const spot = this.path ? { dest: onPath(chosen.dest, this.path), via: null } : chosen;
+    // A Target can only end up somewhere inside its box, so it plans to be there.
+    const pen = this.penned();
+    const spot = pen ? { dest: clampToZone(chosen.dest, pen), via: null } : chosen;
     this.plan = {
       ...spot,
       aim: this.chooseAim(spot.dest),
@@ -440,7 +442,25 @@ export class BotBrain {
 
   // --- where to shoot -----------------------------------------------------------
 
+  /** The box this bot is held to, when it is the one being hunted. */
+  private penned(): Zone | null {
+    return this.mode === 'hunted' && this.role === 'target' ? this.zone : null;
+  }
+
   private chooseAim(from: Vec): number {
+    // Hunted: the Target is somewhere in the box and nothing else may be shot,
+    // so a hunter picks a spot in it and hopes. A good one picks near the
+    // middle, where a dodging Target spends most of its time.
+    const zone = this.mode === 'hunted' && this.role === 'hunter' ? this.zone : null;
+    if (zone) {
+      const spread = this.difficulty === 'hard' ? 0.3 : this.difficulty === 'normal' ? 0.45 : 0.5;
+      const at = {
+        x: zone.x + (this.rng() * 2 - 1) * zone.w * spread,
+        y: zone.y + (this.rng() * 2 - 1) * zone.h * spread,
+      };
+      return angleTo(from, insideZone(at, zone) ? at : clampToZone(at, zone));
+    }
+
     const targets = this.targets();
     if (targets.length === 0) return Math.atan2(-from.y, -from.x);
 

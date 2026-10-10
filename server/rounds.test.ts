@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_FINISHER, HIT_RADIUS, PLAYER_COLORS, TICK_MS } from '../shared/constants.js';
 import { openWorld } from '../shared/maps.js';
-import { ROUND_CYCLES, onPath, walkable, type RoundModeId } from '../shared/modes.js';
+import { ROUND_CYCLES, insideZone, type RoundModeId } from '../shared/modes.js';
 import type { Brief, LobbyPlayer, ServerMessage, SnapshotPlayer } from '../shared/protocol.js';
 import { RoundMatch } from './rounds.js';
 
@@ -133,46 +133,53 @@ function playQuietly(h: ReturnType<typeof setup>): (string | null)[] {
 }
 
 describe('Hunted', () => {
-  it('makes exactly one Target, and only the Target is given a path', () => {
+  it('makes exactly one Target and tells everyone where the box is', () => {
     const h = setup(['a', 'b', 'c'], 'hunted');
     const roles = ['a', 'b', 'c'].map((id) => h.brief(id));
     expect(roles.filter((b) => b.role === 'target')).toHaveLength(1);
     expect(roles.filter((b) => b.role === 'hunter')).toHaveLength(2);
-    for (const b of roles) expect(b.path !== undefined).toBe(b.role === 'target');
-    expect(h.last('round').focus).toBe(['a', 'b', 'c'].find((id) => h.brief(id).role === 'target'));
+    const round = h.last('round');
+    expect(round.focus).toBe(['a', 'b', 'c'].find((id) => h.brief(id).role === 'target'));
+    // The hunters are firing into the box, so the box is public.
+    expect(round.zone).toBeDefined();
   });
 
-  it('gives the Target a walkable path and starts it on that path', () => {
+  it('starts the Target in its box and the hunters in a line outside it', () => {
     const h = setup(['a', 'b', 'c'], 'hunted', 5);
-    const focus = h.last('round').focus!;
-    const path = h.brief(focus).path!;
-    expect(walkable(path.legs, openWorld(800))).toBe(true);
-    const start = h.seen(focus).find((p) => p.id === focus)!;
-    expect(Math.hypot(...((p) => [p.x - start.x, p.y - start.y] as const)(onPath(start, path.legs)))).toBeLessThan(1e-6);
+    const round = h.last('round');
+    const focus = round.focus!;
+    const zone = round.zone!;
+    const seen = h.seen(focus);
+    expect(insideZone(seen.find((p) => p.id === focus)!, zone)).toBe(true);
+    for (const id of ['a', 'b', 'c'].filter((x) => x !== focus)) {
+      const hunter = seen.find((p) => p.id === id)!;
+      expect(insideZone(hunter, zone)).toBe(false);
+      // The line stands on the near side; the box is up the far end.
+      expect(hunter.y).toBeGreaterThan(zone.y);
+    }
   });
 
-  it('keeps the Target on its path however it moves, while hunters roam free', () => {
+  it('keeps the Target in its box however it moves, and the line standing still', () => {
     const h = setup(['a', 'b', 'c'], 'hunted', 2);
-    const focus = h.last('round').focus!;
+    const round = h.last('round');
+    const focus = round.focus!;
+    const zone = round.zone!;
     const hunter = ['a', 'b', 'c'].find((id) => id !== focus)!;
-    const legs = h.brief(focus).path!.legs;
     const startHunter = h.seen(hunter).find((p) => p.id === hunter)!;
 
     h.runUntil('dark');
     h.holdFire(focus);
-    h.match.input(focus, 2, 0.3, 1, 0);
+    h.match.input(focus, 2, 0.3, -1, 0);
     h.match.input(hunter, 2, 0, 1, 0);
     h.advance(500);
-    // A report from off the path is pulled back onto it, never taken as is.
+    // A report from outside the box is pulled back into it, never taken as is.
     const target = h.seen(focus).find((p) => p.id === focus)!;
-    h.match.input(focus, 3, 0, 0, 0, { x: target.x + 40, y: target.y + 70 }, h.now());
+    h.match.input(focus, 3, 0, 0, 0, { x: target.x + 400, y: target.y + 700 }, h.now());
     const lights = h.runUntil('lights', focus);
 
-    const after = lights.players.find((p) => p.id === focus)!;
-    const snapped = onPath(after, legs);
-    expect(Math.hypot(after.x - snapped.x, after.y - snapped.y)).toBeLessThan(1e-6);
-    const roamed = lights.players.find((p) => p.id === hunter)!;
-    expect(Math.hypot(roamed.x - startHunter.x, roamed.y - startHunter.y)).toBeGreaterThan(100);
+    expect(insideZone(lights.players.find((p) => p.id === focus)!, zone)).toBe(true);
+    const held = lights.players.find((p) => p.id === hunter)!;
+    expect(Math.hypot(held.x - startHunter.x, held.y - startHunter.y)).toBeLessThan(1e-6);
   });
 
   it('awards the hunter who shoots the Target and ends the round', () => {
@@ -204,20 +211,19 @@ describe('Hunted', () => {
     expect(h.match.scoreOf(focus)).toBe(1);
   });
 
-  it('lets the Target shoot back: a hit hunter sits out the rest of the round', () => {
+  it('gives the Target nothing to shoot back with', () => {
     const h = setup(['a', 'b', 'c'], 'hunted', 6);
     const focus = h.last('round').focus!;
-    const victim = ['a', 'b', 'c'].find((id) => id !== focus)!;
+    const hunter = ['a', 'b', 'c'].find((id) => id !== focus)!;
 
     h.runUntil('dark');
     h.holdFire(focus);
     const seen = h.seen(focus);
-    h.match.input(focus, 2, 0, 0, aimAt(seen.find((p) => p.id === focus)!, seen.find((p) => p.id === victim)!));
-    const lights = h.runUntil('lights', victim);
+    h.match.input(focus, 2, 0, 0, aimAt(seen.find((p) => p.id === focus)!, seen.find((p) => p.id === hunter)!));
+    const lights = h.runUntil('lights', hunter);
 
-    expect(lights.players.find((p) => p.id === victim)!.alive).toBe(false);
-    expect(h.match.alive(victim)).toBe(false);
-    expect(h.match.scoreOf(focus)).toBe(0);
+    expect(lights.resolution!.beams.some((beam) => beam.id === focus)).toBe(false);
+    expect(h.match.alive(hunter)).toBe(true);
   });
 
   it('rotates the Target so everyone is hunted equally often', () => {

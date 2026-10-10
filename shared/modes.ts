@@ -1,5 +1,5 @@
 import { PLAYER_RADIUS } from './constants.js';
-import { collide, type World } from './maps.js';
+import type { World } from './maps.js';
 
 export const MODE_IDS = ['classic', 'hunted', 'ghost', 'assassin'] as const;
 export type ModeId = (typeof MODE_IDS)[number];
@@ -113,127 +113,74 @@ export function shuffle<T>(items: readonly T[], rng: () => number = Math.random)
   return out;
 }
 
-// --- Hunted paths -------------------------------------------------------------
-
-/** One straight leg of a Target's path. A path is a connected set of legs. */
-export interface Leg {
-  ax: number;
-  ay: number;
-  bx: number;
-  by: number;
-}
-
-export const PATH_SHAPES = ['line', 'l', 't', 'z', 'zigzag', 'square'] as const;
-export type PathShape = (typeof PATH_SHAPES)[number];
-
-export const PATH_NAMES: Record<PathShape, string> = {
-  line: 'Straight line',
-  l: 'L shape',
-  t: 'T shape',
-  z: 'Z shape',
-  zigzag: 'Zigzag',
-  square: 'Square',
-};
-
-export interface TargetPath {
-  shape: PathShape;
-  legs: Leg[];
-}
-
-/** Legs of each shape around the origin, for a shape `s` units across. */
-function sketch(shape: PathShape, s: number): [number, number][][] {
-  const h = s / 2;
-  switch (shape) {
-    case 'line':
-      return [[[-h, 0], [h, 0]]];
-    case 'l':
-      return [[[-h, -h], [-h, h], [h, h]]];
-    case 't':
-      return [[[-h, -h], [h, -h]], [[0, -h], [0, h]]];
-    case 'z':
-      return [[[-h, -h], [h, -h], [-h, h], [h, h]]];
-    case 'zigzag': {
-      const q = s / 4;
-      return [[[-h, q], [-q, -q], [0, q], [q, -q], [h, q]]];
-    }
-    case 'square':
-      return [[[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]]];
-  }
-}
-
-function toLegs(strokes: [number, number][][], cx: number, cy: number, turn: number): Leg[] {
-  const cos = Math.round(Math.cos(turn));
-  const sin = Math.round(Math.sin(turn));
-  const place = ([x, y]: [number, number]) => [cx + x * cos - y * sin, cy + x * sin + y * cos] as const;
-  const legs: Leg[] = [];
-  for (const stroke of strokes) {
-    for (let i = 0; i + 1 < stroke.length; i++) {
-      const [ax, ay] = place(stroke[i]!);
-      const [bx, by] = place(stroke[i + 1]!);
-      legs.push({ ax, ay, bx, by });
-    }
-  }
-  return legs;
-}
-
-/** True when a fighter could stand on every part of the path. */
-export function walkable(legs: readonly Leg[], world: World): boolean {
-  for (const leg of legs) {
-    const length = Math.hypot(leg.bx - leg.ax, leg.by - leg.ay);
-    const steps = Math.max(1, Math.ceil(length / 14));
-    for (let i = 0; i <= steps; i++) {
-      const p = { x: leg.ax + ((leg.bx - leg.ax) * i) / steps, y: leg.ay + ((leg.by - leg.ay) * i) / steps };
-      const free = collide(p, PLAYER_RADIUS, world);
-      if (Math.hypot(free.x - p.x, free.y - p.y) > 0.5) return false;
-    }
-  }
-  return true;
-}
+// --- The hunting ground -------------------------------------------------------
 
 /**
- * A random walkable path of a random shape. Shapes are axis-aligned and turned
- * in quarter turns, so a "horizontal line" reads as one. Falls back to smaller
- * paths, then to a short line, on cramped maps.
+ * Hunted is a shooting gallery. The Target is penned into a small box at the
+ * far end of the arena with nothing to shoot back with, and the hunters stand
+ * in a line at the near end and fire into the box in the dark. Staying alive is
+ * a matter of not being where the shots went.
  */
-export function pickPath(world: World, rng: () => number = Math.random): TargetPath {
+export interface Zone {
+  /** Middle of the box. */
+  x: number;
+  y: number;
+  /** Full width and height, in world units. */
+  w: number;
+  h: number;
+}
+
+/** How wide the box is as a fraction of the arena, and how deep. */
+const ZONE_WIDTH = 0.52;
+const ZONE_DEPTH = 0.22;
+/** How far up the arena the box sits, as a fraction of the half-height. */
+const ZONE_UP = 0.52;
+/** How far down the hunters' line sits. */
+const LINE_DOWN = 0.74;
+
+/** The box this round's Target is held to. */
+export function pickZone(world: World, rng: () => number = Math.random): Zone {
   const r = world.size / 2;
-  for (const scale of [0.62, 0.5, 0.4, 0.3]) {
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const shape = PATH_SHAPES[Math.floor(rng() * PATH_SHAPES.length)]!;
-      const across = r * (scale + rng() * 0.15);
-      const spread = Math.max(0, r - across / 2 - PLAYER_RADIUS * 2) * 0.8;
-      const cx = (rng() * 2 - 1) * spread;
-      const cy = (rng() * 2 - 1) * spread;
-      const turn = Math.floor(rng() * 4) * (Math.PI / 2);
-      const legs = toLegs(sketch(shape, across), cx, cy, turn);
-      if (walkable(legs, world)) return { shape, legs };
-    }
-  }
-  return { shape: 'line', legs: toLegs(sketch('line', r * 0.3), 0, r * 0.6, 0) };
+  // A little variation round to round, so the same corner is never the answer.
+  const w = r * 2 * ZONE_WIDTH * (0.85 + rng() * 0.3);
+  const h = r * 2 * ZONE_DEPTH * (0.85 + rng() * 0.3);
+  const slack = Math.max(0, r - w / 2 - PLAYER_RADIUS * 2);
+  return {
+    x: (rng() * 2 - 1) * slack * 0.5,
+    y: -r * ZONE_UP,
+    w,
+    h,
+  };
 }
 
-/** The point on the path nearest to `p`: where a Target trying to stand at `p` ends up. */
-export function onPath(p: { x: number; y: number }, legs: readonly Leg[]): { x: number; y: number } {
-  let best = { x: p.x, y: p.y };
-  let bestDistance = Infinity;
-  for (const leg of legs) {
-    const dx = leg.bx - leg.ax;
-    const dy = leg.by - leg.ay;
-    const len2 = dx * dx + dy * dy;
-    const t = len2 === 0 ? 0 : Math.min(1, Math.max(0, ((p.x - leg.ax) * dx + (p.y - leg.ay) * dy) / len2));
-    const x = leg.ax + dx * t;
-    const y = leg.ay + dy * t;
-    const d = Math.hypot(p.x - x, p.y - y);
-    if (d < bestDistance) {
-      best = { x, y };
-      bestDistance = d;
-    }
-  }
-  return best;
+/** The Target cannot leave the box: anywhere outside it is pushed back in. */
+export function clampToZone(p: { x: number; y: number }, zone: Zone): { x: number; y: number } {
+  const x = zone.w / 2 - PLAYER_RADIUS;
+  const y = zone.h / 2 - PLAYER_RADIUS;
+  return {
+    x: zone.x + Math.max(-x, Math.min(x, p.x - zone.x)),
+    y: zone.y + Math.max(-y, Math.min(y, p.y - zone.y)),
+  };
 }
 
-/** Where a Target starts: the middle of its first leg. */
-export function pathStart(path: TargetPath): { x: number; y: number } {
-  const leg = path.legs[0]!;
-  return { x: (leg.ax + leg.bx) / 2, y: (leg.ay + leg.by) / 2 };
+export function insideZone(p: { x: number; y: number }, zone: Zone): boolean {
+  return Math.abs(p.x - zone.x) <= zone.w / 2 && Math.abs(p.y - zone.y) <= zone.h / 2;
+}
+
+/** Where the Target starts: the middle of its box. */
+export const zoneStart = (zone: Zone): { x: number; y: number } => ({ x: zone.x, y: zone.y });
+
+/**
+ * The firing line: hunters stand shoulder to shoulder across the near end,
+ * facing the box. They do not move all round; all they have is the aim.
+ */
+export function huntLine(count: number, world: World, zone: Zone): { x: number; y: number; aim: number }[] {
+  const r = world.size / 2;
+  const y = r * LINE_DOWN;
+  const usable = r * 2 - PLAYER_RADIUS * 6;
+  const step = count > 1 ? usable / (count - 1) : 0;
+  return Array.from({ length: count }, (_, i) => {
+    const x = count > 1 ? -usable / 2 + step * i : 0;
+    return { x, y, aim: Math.atan2(zone.y - y, zone.x - x) };
+  });
 }
