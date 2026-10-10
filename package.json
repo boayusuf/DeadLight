@@ -7,8 +7,6 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "build:firebase": "vite build --mode firebase",
-    "deploy:firebase": "npm run build:firebase && firebase deploy --only hosting",
     "start": "node dist/server/index.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

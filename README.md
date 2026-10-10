@@ -90,10 +90,10 @@ npm run build
 npm start
 ```
 
-`render.yaml` deploys it to Render as a single web service.
-
-The client can also go on Firebase Hosting, talking to that server:
-`npm run deploy:firebase` (the server URL is in `.env.firebase`).
+`render.yaml` deploys it to Render as a single web service: one process
+serves the page and the WebSocket server, so there is one address and one
+thing to keep running. `.github/workflows/keepalive.yml` pings it every five
+minutes, because a free service that is left alone for fifteen goes to sleep.
 
 ## How it works
 
