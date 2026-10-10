@@ -1,4 +1,4 @@
-import { MODE_BLURBS, MODE_MIN_PLAYERS, MODE_NAMES, type ModeId } from './modes.js';
+import { MODE_BLURBS, MODE_IDS, MODE_MIN_PLAYERS, MODE_NAMES, type ModeId } from './modes.js';
 
 /**
  * The games a room can play. `deadlight` is the blackout shooter this project
@@ -58,6 +58,18 @@ export const GAME_VIEW: Record<MiniGameId, { w: number; h: number }> = {
   sumo: { w: 1200, h: 1200 },
   potato: { w: 1100, h: 1100 },
 };
+
+/**
+ * Everything a lobby can be set to, in the order the picker shows it: the dark
+ * game and its three modes, then the five lit games, then a mix of them all.
+ * `classic` is DeadLight itself, so it is not listed twice.
+ */
+export const PICKABLE: readonly (GameMode | 'mix')[] = [
+  'classic',
+  ...MODE_IDS.filter((m) => m !== 'classic'),
+  ...MINI_GAME_IDS,
+  'mix',
+];
 
 /** What the lobby may be set to: one game, or a different one every round. */
 export type GameChoice = GameId | 'mix';

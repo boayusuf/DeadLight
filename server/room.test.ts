@@ -186,11 +186,19 @@ describe('Room bots', () => {
     expect(room.emptySince).toBe(5000);
   });
 
-  it('never seats bots in matchmaking, by itself or on request', () => {
+  it('never seats a bot in matchmaking by itself, but will on request', () => {
     const room = new Room(null);
     room.join('a', 'A', quiet);
-    room.addBot('a', 'normal');
     for (let clock = 1000; clock < 60_000; clock += TICK_MS) room.tick(clock, TICK_MS / 1000);
+    expect(room.members.map((m) => m.id)).toEqual(['a']);
+    room.addBot('a', 'normal');
+    expect(room.members.map((m) => m.id)).toEqual(['a', 'bot1']);
+  });
+
+  it('only seats a bot for someone who is actually in the room', () => {
+    const room = new Room(null);
+    room.join('a', 'A', quiet);
+    room.addBot('stranger', 'normal');
     expect(room.members.map((m) => m.id)).toEqual(['a']);
   });
 });

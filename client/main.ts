@@ -31,7 +31,7 @@ import {
 } from '../shared/maps.js';
 import {
   GAME_IDS,
-  GAME_NAMES,
+  PICKABLE,
   gameModeBlurb,
   gameModeMinPlayers,
   gameModeName,
@@ -310,11 +310,16 @@ const mapPicks = (['random', ...MAP_IDS] as MapChoice[]).map((map) => {
 });
 
 /** The four modes. Only the host's buttons do anything, and only in a party. */
-/** The seven buttons: six games and a mix of them. */
-const GAME_CHOICES: GameChoice[] = [...GAME_IDS, 'mix'];
+/** Every game the lobby can be set to, in the order they are shown. */
+type Pick = GameMode | 'mix';
+const GAME_CHOICES: Pick[] = [...PICKABLE];
 
 /** What this player wants to play, picked on the menu before a room exists. */
-let wanted: GameChoice = 'deadlight';
+let wanted: Pick = 'classic';
+
+const pickName = (pick: Pick): string => (pick === 'mix' ? 'Mix' : gameModeName(pick));
+const pickBlurb = (pick: Pick): string =>
+  pick === 'mix' ? 'A different game every round.' : gameModeBlurb(pick);
 
 /** A card on the menu: the game's own picture over its name. */
 const gameCards = GAME_CHOICES.map((game) => {
@@ -324,7 +329,7 @@ const gameCards = GAME_CHOICES.map((game) => {
   pixel.className = 'pixel';
   const name = document.createElement('span');
   name.className = 'name';
-  name.textContent = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  name.textContent = pickName(game);
   button.append(pixel, name);
   button.addEventListener('click', () => {
     wanted = game;
@@ -343,28 +348,18 @@ const gamePicks = GAME_CHOICES.map((game) => {
   pixel.className = 'pixel';
   const name = document.createElement('span');
   name.className = 'name';
-  name.textContent = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  name.textContent = pickName(game);
   button.append(pixel, name);
   button.addEventListener('click', () => net.send({ t: 'mode', mode: game }));
   dom.lobbyGames.append(button);
   return { game, button, pixel };
 });
 
-/** The dark game's own four modes, shown only when it is the game. */
-const modePicks = MODE_IDS.map((mode) => {
-  const button = document.createElement('button');
-  button.className = 'key';
-  button.textContent = gameModeName(mode);
-  button.addEventListener('click', () => net.send({ t: 'mode', mode }));
-  dom.modePicks.append(button);
-  return { mode, button };
-});
-
 /** Which games 'mix' may draw from. */
 const poolPicks = GAME_IDS.map((game) => {
   const button = document.createElement('button');
   button.className = 'key';
-  button.textContent = GAME_NAMES[game];
+  button.textContent = gameModeName(game === 'deadlight' ? 'classic' : game);
   button.addEventListener('click', () => {
     const pool = new Set(session.games);
     if (pool.has(game)) pool.delete(game);
@@ -441,13 +436,12 @@ let sessionLabel = '';
 
 /** The card between games: shown as a game is announced, gone when it is live. */
 let introUntil = 0;
-let introGame: GameChoice = 'deadlight';
+let introGame: Pick = 'classic';
 
 function announceGame(msg: Extract<ServerMessage, { t: 'session' }>, now: number): void {
-  const game: GameChoice = isMiniGameId(msg.next) ? msg.next : 'deadlight';
-  introGame = game;
+  introGame = msg.next;
   introUntil = now + msg.startsInMs;
-  dom.introName.textContent = game === 'deadlight' ? GAME_NAMES.deadlight : GAME_NAMES[game];
+  dom.introName.textContent = gameModeName(msg.next);
   dom.introRule.textContent = gameModeBlurb(msg.next);
   const parts: string[] = [];
   if (msg.runs > 1) parts.push(`RUN ${msg.run}/${msg.runs}`);
@@ -462,8 +456,7 @@ function announceGame(msg: Extract<ServerMessage, { t: 'session' }>, now: number
 /** The menu picker shows what this player will ask for. */
 function showWanted(): void {
   for (const card of gameCards) card.button.classList.toggle('mine', card.game === wanted);
-  dom.gameBlurb.textContent =
-    wanted === 'mix' ? 'A different game every round.' : gameModeBlurb(wanted === 'deadlight' ? 'classic' : wanted);
+  dom.gameBlurb.textContent = pickBlurb(wanted);
 }
 
 
@@ -473,31 +466,22 @@ function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
   const party = msg.code !== null;
   const seated = msg.players.length;
   // An older server says less about the room; fall back rather than break.
-  const game: GameChoice = msg.game ?? (isMiniGameId(msg.gameMode) ? msg.gameMode : 'deadlight');
-  const darkMode = msg.darkMode ?? (isMiniGameId(msg.gameMode) ? 'classic' : msg.gameMode);
+  const game: Pick = msg.game === 'mix' ? 'mix' : (msg.gameMode as GameMode);
   session = msg.session ?? session;
   wanted = game;
 
-  const name = game === 'mix' ? 'Mix' : GAME_NAMES[game];
+  const name = pickName(game);
   dom.lobbyGame.textContent = party ? name : `Next: ${name}`;
+  const short = game !== 'mix' && seated < gameModeMinPlayers(game);
+  dom.modeBlurb.textContent = short ? `Needs ${gameModeMinPlayers(game)} fighters or more.` : pickBlurb(game);
+  dom.modeBlurb.classList.toggle('warn', short);
+  dom.modeSection.hidden = false;
+  dom.modeName.textContent = name;
   for (const pick of gamePicks) {
     pick.button.classList.toggle('mine', pick.game === game);
     pick.button.disabled = !host || !party;
   }
   for (const card of gameCards) card.button.classList.toggle('mine', card.game === game);
-
-  // The dark game keeps its four modes; the lit ones have none.
-  dom.modeSection.hidden = game !== 'deadlight';
-  const short = seated < gameModeMinPlayers(game === 'deadlight' ? darkMode : (game as GameMode));
-  dom.modeName.textContent = gameModeName(darkMode);
-  dom.modeBlurb.textContent = short
-    ? `Needs ${gameModeMinPlayers(darkMode)} fighters or more.`
-    : gameModeBlurb(darkMode);
-  dom.modeBlurb.classList.toggle('warn', short);
-  for (const pick of modePicks) {
-    pick.button.classList.toggle('mine', pick.mode === darkMode);
-    pick.button.disabled = !host || !party;
-  }
 
   // Runs always apply; the pool and the games-per-run only matter for a mix.
   dom.voteMix.hidden = game !== 'mix';
@@ -516,8 +500,8 @@ function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
     pick.button.disabled = !host || !party;
   }
 
-  // A lit game ignores the arena, so the picker goes away with it.
-  dom.mapSection.hidden = game !== 'deadlight' && game !== 'mix';
+  // The lit games ignore the arena, so the picker goes away with them.
+  dom.mapSection.hidden = game !== 'mix' && isMiniGameId(game);
 }
 
 function showMap(choice: MapChoice, host: boolean, party: boolean): void {
@@ -569,7 +553,8 @@ function handle(msg: ServerMessage): void {
       dom.btnStart.disabled = msg.players.length < Math.max(2, gameModeMinPlayers(msg.gameMode));
       showGame(msg);
       isHost = msg.host;
-      dom.botRow.hidden = !msg.code || !msg.host;
+      // Bots can be seated in any lobby, party or queue.
+      dom.botRow.hidden = false;
       dom.btnBot.disabled = msg.players.length >= MAX_PLAYERS;
       showMap(msg.map, msg.host, msg.code !== null);
       dom.btnReady.classList.toggle('on', ready);
@@ -1311,7 +1296,7 @@ async function join(mode: 'public' | 'create' | 'code'): Promise<void> {
   if (mode === 'code') net.send({ t: 'join', name, finisher, mode, code: dom.code.value });
   else net.send({ t: 'join', name, finisher, mode });
   // A party opens on the game picked from the menu; matchmaking sets its own.
-  if (mode === 'create' && wanted !== 'deadlight') net.send({ t: 'mode', mode: wanted });
+  if (mode === 'create' && wanted !== 'classic') net.send({ t: 'mode', mode: wanted });
 }
 
 dom.name.value = localStorage.getItem('deadlight.name') ?? '';

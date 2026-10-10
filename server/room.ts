@@ -140,16 +140,24 @@ export class Room {
     this.sendLobby();
   }
 
-  /** Party host only, outside a match. Seats a bot with a free colour and a random finisher. */
+  /**
+   * Seats a bot with a free colour and a random finisher. A party's host does
+   * it; in matchmaking anyone waiting may, so a queue that never fills can
+   * still be played.
+   */
   addBot(requester: string, difficulty: unknown): void {
-    if (this.isPublic || requester !== this.hostId || this.match || this.members.length >= MAX_PLAYERS) return;
+    if (this.match || this.members.length >= MAX_PLAYERS) return;
+    if (!this.isPublic && requester !== this.hostId) return;
+    if (!this.members.some((m) => m.id === requester)) return;
     if (!DIFFICULTIES.includes(difficulty as BotDifficulty)) return;
     this.seatBot(difficulty as BotDifficulty);
     this.sendLobby();
   }
 
   removeBot(requester: string, botId: unknown): void {
-    if (this.isPublic || requester !== this.hostId || this.match) return;
+    if (this.match) return;
+    if (!this.isPublic && requester !== this.hostId) return;
+    if (!this.members.some((m) => m.id === requester)) return;
     const i = this.members.findIndex((m) => m.bot && m.id === botId);
     if (i === -1) return;
     this.members.splice(i, 1);

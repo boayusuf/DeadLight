@@ -1,4 +1,5 @@
-import { GAME_IDS, type GameChoice, type GameId } from '../shared/games.js';
+import { GAME_IDS, type GameId } from '../shared/games.js';
+import type { ModeId } from '../shared/modes.js';
 import { PixelBuffer } from './pixel.js';
 
 /**
@@ -23,7 +24,7 @@ const ICE = 0x6f93b8;
 /** One buffer, reused for every icon: they are drawn one at a time. */
 const buffer = new PixelBuffer();
 
-export type IconName = GameChoice | 'music' | 'muted' | 'leave';
+export type IconName = GameId | ModeId | 'mix' | 'music' | 'muted' | 'leave';
 
 /** Paints an icon at the canvas's own size, which the stylesheet sets. */
 export function paintIcon(canvas: HTMLCanvasElement, icon: IconName, now: number): void {
@@ -42,7 +43,14 @@ export function paintIcon(canvas: HTMLCanvasElement, icon: IconName, now: number
 function draw(icon: IconName, cx: number, cy: number, s: number, now: number): void {
   switch (icon) {
     case 'deadlight':
+    case 'classic':
       return deadlight(cx, cy, s, now);
+    case 'hunted':
+      return hunted(cx, cy, s, now);
+    case 'ghost':
+      return ghost(cx, cy, s, now);
+    case 'assassin':
+      return assassin(cx, cy, s, now);
     case 'freeze':
       return eye(cx, cy, s, now);
     case 'collapse':
@@ -73,6 +81,49 @@ function deadlight(cx: number, cy: number, s: number, now: number): void {
   buffer.line(cx, cy + swing, cx + s * 0.44, cy - s * 0.1 + swing, PINK, 0.95, true);
   buffer.glow(cx + s * 0.4, cy - s * 0.1 + swing, s * 0.12, PINK, 0.7);
   buffer.disc(cx - s * 0.06, cy, Math.max(1, s * 0.09), PALE, 0.9);
+}
+
+/** Hunted: a fighter held to a path, with everyone else closing in. */
+function hunted(cx: number, cy: number, s: number, now: number): void {
+  const r = s * 0.3;
+  buffer.line(cx - r, cy + r * 0.7, cx + r, cy + r * 0.7, METAL, 0.9);
+  buffer.line(cx - r, cy + r * 0.7, cx - r, cy - r * 0.6, METAL, 0.9);
+  const along = (now / 1400) % 1;
+  const x = cx - r + r * 2 * along;
+  buffer.disc(x, cy + r * 0.7, Math.max(1, s * 0.1), AMBER);
+  buffer.ring(x, cy + r * 0.7, Math.max(2, s * 0.2), PINK, 0.8);
+  buffer.disc(cx + r * 0.6, cy - r * 0.5, Math.max(1, s * 0.08), PINK, 0.9);
+  buffer.disc(cx - r * 0.7, cy - r * 0.3, Math.max(1, s * 0.08), PINK, 0.9);
+}
+
+/** Ghost: there, and then not. */
+function ghost(cx: number, cy: number, s: number, now: number): void {
+  const fade = 0.3 + 0.45 * (0.5 + 0.5 * Math.sin(now / 700));
+  const r = s * 0.26;
+  const body = [
+    { x: cx - r, y: cy + r },
+    { x: cx - r, y: cy - r * 0.3 },
+    { x: cx, y: cy - r * 1.1 },
+    { x: cx + r, y: cy - r * 0.3 },
+    { x: cx + r, y: cy + r },
+  ];
+  buffer.fillConvex(body, PALE, fade);
+  buffer.polyline([...body, body[0]!], PALE, fade * 0.8);
+  buffer.disc(cx - r * 0.4, cy - r * 0.25, 1, BACK, fade + 0.2);
+  buffer.disc(cx + r * 0.4, cy - r * 0.25, 1, BACK, fade + 0.2);
+}
+
+/** Assassin: a name on a card, and a blade for it. */
+function assassin(cx: number, cy: number, s: number, now: number): void {
+  const w = s * 0.46;
+  const h = s * 0.32;
+  buffer.rect(cx - w / 2, cy - h / 2 + 2, w, h, PANEL);
+  buffer.rect(cx - w / 2, cy - h / 2 + 2, w, h, METAL, 0.6);
+  buffer.rect(cx - w / 2 + 2, cy - 2, w - 6, 1, INK, 0.9);
+  buffer.rect(cx - w / 2 + 2, cy + 2, w - 10, 1, INK, 0.7);
+  const slide = Math.sin(now / 800) * s * 0.06;
+  buffer.line(cx + w * 0.1 + slide, cy - h, cx + w * 0.5 + slide, cy - h * 0.1, PALE, 0.95);
+  buffer.line(cx + w * 0.1 + slide, cy - h * 0.9, cx + w * 0.3 + slide, cy - h * 0.5, PINK, 0.8);
 }
 
 /** Freeze: the eye, open on green and a slit on red. */
@@ -171,7 +222,7 @@ function bomb(cx: number, cy: number, s: number, now: number): void {
 
 /** Mix: a different game every round, so the icon cycles through them. */
 function mix(cx: number, cy: number, s: number, now: number): void {
-  const order = GAME_IDS.filter((g): g is GameId => g !== 'deadlight');
+  const order: GameId[] = GAME_IDS.filter((g): g is GameId => g !== 'deadlight');
   const which = order[Math.floor(now / 1200) % order.length]!;
   draw(which, cx, cy, s * 0.9, now);
   buffer.rect(cx - s * 0.45, cy + s * 0.34, s * 0.9, 1, AMBER, 0.8);
