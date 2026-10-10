@@ -469,10 +469,13 @@ function showWanted(): void {
 
 /** The Game pane: what the room is set to, and what the host may change. */
 function showGame(msg: Extract<ServerMessage, { t: 'lobby' }>): void {
-  const { game, darkMode, host } = msg;
+  const host = msg.host;
   const party = msg.code !== null;
   const seated = msg.players.length;
-  session = msg.session;
+  // An older server says less about the room; fall back rather than break.
+  const game: GameChoice = msg.game ?? (isMiniGameId(msg.gameMode) ? msg.gameMode : 'deadlight');
+  const darkMode = msg.darkMode ?? (isMiniGameId(msg.gameMode) ? 'classic' : msg.gameMode);
+  session = msg.session ?? session;
   wanted = game;
 
   const name = game === 'mix' ? 'Mix' : GAME_NAMES[game];
